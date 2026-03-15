@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel", "numpy>=1.23"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaussregular"
+version = "0.1.0"
+description = "ECMWF reduced Gaussian (N/O) to regular Gaussian in-memory converter"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Qianye Su", email = "suqianye2000@gmail.com" }]
+dependencies = ["numpy>=1.23"]
+
+[project.optional-dependencies]
+xarray = ["xarray>=2023.1", "cfgrib>=0.9.10"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,4 @@
+option('fast_math',
+  type: 'boolean',
+  value: true,
+  description: 'Enable aggressive floating-point optimization (-ffast-math or /fp:fast)')
