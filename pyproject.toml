@@ -7,8 +7,9 @@ name = "gaussregular"
 version = "0.1.0"
 description = "ECMWF reduced Gaussian (N/O) to regular Gaussian in-memory converter"
 readme = "README.md"
+license = { text = "BSD-3-Clause" }
 requires-python = ">=3.9"
-authors = [{ name = "Qianye Su", email = "suqianye2000@gmail.com" }]
+authors = [{ name = "Qianye Su", email = "976113615@qq.com" }]
 dependencies = ["numpy>=1.23"]
 
 [project.optional-dependencies]

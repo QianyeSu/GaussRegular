@@ -226,13 +226,7 @@ python examples/run_era5_demo.py
 - **NumPy**: ≥1.23
 - **Optional**: xarray ≥2023.1, cfgrib ≥0.9.10
 
-## License
 
-[Specify your license, e.g., MIT, GPL, etc.]
-
-## Author
-
-Qianye Su
 
 ## Citation
 
@@ -241,8 +235,8 @@ If you use GaussRegular in research, please cite:
 @software{gaussregular,
   author = {Qianye Su},
   title = {GaussRegular: ECMWF Reduced Gaussian to Regular Grid Converter},
-  year = {2024},
-  url = {https://github.com/yourusername/GaussRegular}
+  year = {2026},
+  url = {https://github.com/QianyeSu/GaussRegular}
 }
 ```
 
