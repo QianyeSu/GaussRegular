@@ -47,10 +47,10 @@ jobs:
           path: wheelhouse/*.whl
 
   # =========================================================================
-  # Linux x86_64 (manylinux_2_14)
+  # Linux x86_64 (manylinux2014 for legacy servers)
   # =========================================================================
   build_linux2014_x86_64:
-    name: Linux x86_64 (manylinux_2_14)
+    name: Linux x86_64 (manylinux2014)
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -67,9 +67,9 @@ jobs:
       - name: Build wheels
         run: python -m cibuildwheel --output-dir wheelhouse
         env:
-          CIBW_BUILD: "cp39-manylinux_2_14_x86_64 cp310-manylinux_2_14_x86_64 cp311-manylinux_2_14_x86_64 cp312-manylinux_2_14_x86_64"
+          CIBW_BUILD: "cp39-manylinux_x86_64 cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
           CIBW_SKIP: "*-musllinux* *-win32"
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_14
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
           CIBW_BEFORE_BUILD: python -m pip install --upgrade pip setuptools wheel numpy
           CIBW_TEST_COMMAND: python -c "import gaussregular as gr; print(gr.__name__)"
           CIBW_BUILD_VERBOSITY: 1
@@ -169,13 +169,19 @@ jobs:
   # =========================================================================
   test_install:
     name: Test ${{ matrix.os }}
-    needs: [build_linux_x86_64, build_macos_arm64, build_windows_x86_64]
+    needs:
+      [
+        build_linux_x86_64,
+        build_linux2014_x86_64,
+        build_macos_arm64,
+        build_windows_x86_64,
+      ]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14, windows-latest]
-        python-version: ["3.9", "3.10", "3.12"]
+        python-version: ["3.12"]
 
     steps:
       - uses: actions/checkout@v6
