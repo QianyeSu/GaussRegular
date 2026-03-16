@@ -1,8 +1,7 @@
-# GaussRegular
 
 <div align="center">
   <a href="https://github.com/QianyeSu/GaussRegular">
-    <img src="https://raw.githubusercontent.com/QianyeSu/GaussRegular/main/assets/logo.svg" alt="GaussRegular Logo" width="400">
+    <img src="https://raw.githubusercontent.com/QianyeSu/GaussRegular/main/assets/logo.svg" alt="GaussRegular Logo" width="700">
   </a>
 </div>
 
