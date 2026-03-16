@@ -56,10 +56,10 @@ import numpy as np
 import gaussregular as gr
 
 # Your reduced Gaussian data (1D array, one value per grid point)
-values = np.random.rand(1040640)  # Example: N320 reduced grid
+values = np.random.rand(1040640)  # Example data
 
 # Gaussian row length array (from GRIB metadata, e.g., GRIB_pl)
-pl = np.array([20, 27, 36, 40, 45, ..., 360, 360], dtype=np.int32)  # 161 entries for N320
+pl = np.array([20, 27, 36, 40, 45, ..., 360, 360], dtype=np.int32)  # 161 latitude rows in this example
 
 # Create regularizer
 regularizer = gr.GaussRegularizer(method="linear")
@@ -71,7 +71,7 @@ regular_data, lon = regularizer.regularize_values(
     missval=np.nan
 )
 
-print(f"Output shape: {regular_data.shape}")  # (161, 320) for N320
+print(f"Output shape: {regular_data.shape}")  # e.g. (161, 320) in this example
 print(f"Longitude points: {lon.size}")
 ```
 
@@ -109,12 +109,12 @@ import gaussregular as gr
 
 # Multi-dimensional xarray: (time, level, values)
 ds = xr.open_dataset("era5_multi_level.grib", engine="cfgrib")
-da = ds["temperature"]  # Shape: (24, 137, 1040640)
+da = ds["temperature"]  # Shape: (24, 137, 1040640) in this example
 
 regularizer = gr.GaussRegularizer(method="linear", cache=True)
 regular_da = regularizer.regularize_xarray(da)
 
-print(f"Output shape: {regular_da.shape}")  # (24, 137, 161, 320) for N320
+print(f"Output shape: {regular_da.shape}")  # e.g. (24, 137, 161, 320) in this example
 ```
 
 The regularizer automatically handles reshaping and maintains coordinate dimensions.
@@ -250,8 +250,8 @@ Main converter class.
 
 ### N-grids (Classical Gaussian)
 - **Regular spacing in longitude**
-- Example: N320 → 320 columns in regular grid
-- Total points: 4×N×(2N+1) for N-grid
+- Example: N320 → 4×N = 1280 columns at the equator in the regular grid
+- Total reduced-grid points: 4×N×(2N+1)
 
 ### O-grids (Octahedral)
 - **Refinement at equator** for better accuracy
