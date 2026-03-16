@@ -163,7 +163,7 @@ class GaussRegularizer:
     method: str = "linear"
     grid_number: Optional[int] = None
     cache: bool = False
-    max_plan_cache: int = 32
+    max_plan_cache: int = 100000
     _xarray_plan_cache: dict[tuple, dict[str, Any]] = field(
         default_factory=dict, init=False, repr=False)
 
