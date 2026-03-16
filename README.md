@@ -2,15 +2,16 @@
 
 A lightweight, high-performance Python library for converting ECMWF reduced Gaussian grids (N-grids and O-grids) to regular Gaussian grids. Designed for efficient in-memory processing with zero intermediate file I/O.
 
-## 🔴 CRITICAL: Input Data Must Have NO Missing Values
+## 🔴 Missing Values and Fast Mode
 
-**This library requires that all input grid points contain valid data.** Missing values (NaN, masked values, etc.) are **strictly not allowed**. If your GRIB2 data contains missing values:
+GaussRegular **can** handle missing values (NaN or a numeric sentinel) in its default safe mode. Both interpolation methods:
 
-1. **Pre-process** to interpolate or fill missing data, OR
-2. **Subset** data to regions with complete coverage, OR
-3. **Use CDO** if you need missing-value-aware regridding
+- treat points equal to `missval` (or NaN, when `missval=np.nan`) as missing;
+- propagate missing values in a controlled way:
+  - `linear`: uses the valid neighbour when one side is missing; if both neighbours are missing, outputs `missval`;
+  - `nearest`: if the nearest point is missing, searches outward until a valid neighbour is found, otherwise outputs `missval`.
 
-**Why?** Missing-value-aware interpolation requires case-by-case boundary handling that significantly complicates the algorithm. By enforcing complete data, GaussRegular achieves maximum performance while maintaining numerical accuracy.
+For maximum performance when you are **certain** the input has no missing values, set `fast=True`. In this mode, per-row missing-value detection is skipped and any hidden missing values will be treated as regular numbers (behaviour is effectively undefined if missing values are present).
 
 ## Overview
 
@@ -212,7 +213,7 @@ Main converter class.
 **`regularize_values(values, pl, missval, nlon=None, method=None, fast=False)`**
 - **`values`**: 1D NumPy array (`len(values) == sum(pl)`)
 - **`pl`**: 1D NumPy array of row lengths (from GRIB_pl)
-- **`missval`**: Missing value sentinel (float). **Input must NOT contain this value**
+- **`missval`**: Missing-value sentinel (float). Points equal to this value (or NaN, if `missval` is NaN) are treated as missing and handled by the interpolation kernel
 - **`nlon`** (optional): Number of columns in output regular grid. Auto-inferred if not provided
 - **`method`** (optional): Per-call method override: `"linear"` or `"nearest"`
 - **`fast`** (optional): Skip missing-value detection when input has no missing values
@@ -220,7 +221,7 @@ Main converter class.
 
 **`regularize_xarray(dataarray, nlon=None, grid_type_hint=None, method=None, fast=False)`**
 - **`dataarray`**: xarray.DataArray with GRIB metadata in `.attrs`
-- Requires: `GRIB_pl` and `GRIB_missingValue` attributes
+- Requires: `GRIB_pl` attribute. If `GRIB_missingValue` is present it is used as `missval`; otherwise NaN values are treated as missing
 - **`method`** (optional): Per-call method override: `"linear"` or `"nearest"`
 - **`fast`** (optional): Skip missing-value detection when input has no missing values
 - Returns: xarray.DataArray with regularized data and preserved coordinates
@@ -291,19 +292,12 @@ Typical throughput:
 
 ## Limitations
 
-1. **Input must be missing-value-free** — no NaN or masked values allowed
+1. **Missing values must be consistently marked** — via NaN or a numeric `missval`/`GRIB_missingValue`; when `fast=True` you must guarantee there are no missing values
 2. **Requires GRIB metadata** — `pl` array must be provided or in DataArray attrs
 3. **Supports only Gaussian grids** — other map projections not supported
 4. **Precision**: Outputs double-precision computation; results cast back to input dtype
 5. **No projection support** — only Gaussian grid conversions
 
-## Examples
-
-See the `examples/` directory (not in wheel) for:
-- `run_era5_demo.py` — Real ERA5 data conversion
-- `test_real_numpy_xarray.py` — Detailed input validation examples
-- `benchmark_speed.py` — Performance benchmarking
-- `benchmark_dataset_fast_nomissing.py` — Fast mode demonstration with speedup measurement
 
 ## Testing & Validation
 
@@ -344,9 +338,10 @@ If you use GaussRegular in research, please cite:
 - Verify your file contains a reduced Gaussian grid (not full Gaussian, lat-lon, or other projection)
 - Pass `grid_type_hint` if metadata is nonstandard
 
-### "Input contains missing values"
-- Preprocess your data: `da = da.interpolate_na(dim='...')`  or mask/remove missing values
-- Check data before calling GaussRegular
+### "Results look wrong near missing values"
+- Ensure you are not using `fast=True` when missing values are present
+- Verify that missing values are either NaN (and `missval` is left as default) or match the `GRIB_missingValue`/`missval` you pass
+- If necessary, preprocess your data（例如插值或填充）以减少大块缺测区域对结果的影响
 
 ### Performance is slower than expected
 - Use `method="linear"` unless you specifically want nearest-neighbour behavior

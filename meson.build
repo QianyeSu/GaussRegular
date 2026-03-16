@@ -52,6 +52,6 @@ py.install_sources(
 )
 
 py.install_sources(
-  ['src/gaussreg/__init__.py'],
+  ['src/gaussregular/__init__.py'],
   subdir: 'gaussreg',
 )

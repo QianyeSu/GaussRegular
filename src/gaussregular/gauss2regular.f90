@@ -1,3 +1,8 @@
+! NOTE: Experimental / unused Fortran backend.
+! The Python package currently uses the C implementation in _core.c.
+! This module is kept for reference only and is not part of the
+! supported public API. Benchmarks show it is slower than the C backend.
+
 module gauss2regular_mod
   use iso_c_binding
   implicit none

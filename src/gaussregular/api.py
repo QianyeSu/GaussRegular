@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Tuple
 
 import numpy as np
-import xarray as xr
 from . import _core
 
 
@@ -67,6 +66,22 @@ def _is_supported_reduced_grid(attrs: dict[str, Any]) -> bool:
     if "reduced" in desc and "gaussian" in desc:
         return True
     return False
+
+
+def _require_xarray():
+    """Import xarray on demand for xarray-based APIs.
+
+    This keeps ``gaussregular`` importable without xarray installed while still
+    providing a clear error message when xarray-specific functions are used.
+    """
+    try:
+        import xarray as xr  # type: ignore[import]
+    except ImportError as exc:  # pragma: no cover - import error path
+        raise ImportError(
+            "xarray is required for xarray-based APIs; "
+            "install it via 'pip install \"gaussregular[xarray]\"'."
+        ) from exc
+    return xr
 
 
 @dataclass
@@ -365,6 +380,8 @@ class GaussRegularizer:
             ``gaussregular_converted``, ``gaussregular_mode``,
             ``gaussregular_is_global``.
         """
+        xr = _require_xarray()
+
         if not hasattr(dataarray, "attrs"):
             raise TypeError("dataarray must be an xarray.DataArray")
 
@@ -466,6 +483,8 @@ class GaussRegularizer:
         dataset attributes, that metadata is propagated to each variable before
         conversion.
         """
+        xr = _require_xarray()
+
         if not isinstance(dataset, xr.Dataset):
             raise TypeError("dataset must be an xarray.Dataset")
 
@@ -528,7 +547,8 @@ class GaussRegularizer:
 
             out, lon = engine.regularize(values, pl=pl, missval=9.999e20, grid_number=320)
         """
-        if isinstance(data, xr.Dataset):
+        # xarray Dataset-like input (duck-typed to avoid hard dependency).
+        if hasattr(data, "data_vars") and hasattr(data, "attrs"):
             return self.regularize_dataset(data, **kwargs)
 
         # Auto-detect xarray DataArray-like objects next.
