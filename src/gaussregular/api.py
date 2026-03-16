@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional, Tuple
+from typing import Any, Iterable, Mapping, Optional, Tuple, TYPE_CHECKING, Union
 
 import numpy as np
 from . import _core
+
+if TYPE_CHECKING:  # pragma: no cover - used only for static typing
+    import xarray as xr
 
 
 # Supported reduced-Gaussian grid type names and their meaning.
@@ -55,7 +58,7 @@ def _normalize_method(method: Optional[str], default: str = "linear") -> str:
     return chosen
 
 
-def _is_supported_reduced_grid(attrs: dict[str, Any]) -> bool:
+def _is_supported_reduced_grid(attrs: Mapping[str, Any]) -> bool:
     grid_type = str(attrs.get("GRIB_gridType", attrs.get(
         "gridType", ""))).strip().lower()
     if grid_type in REDUCED_GAUSSIAN_ALIASES:
@@ -129,9 +132,12 @@ class GaussRegularizer:
         Interpolation method. ``linear`` (default) matches CDO
         ``setgridtype,regular``; ``nearest`` matches CDO
         ``setgridtype,regularnn``.
-    default_np_value:
-        Default Gaussian truncation number N (e.g. 320 for N320/O320).  Used
-        only when *grid_number* is not supplied per-call.
+    grid_number:
+        Optional default Gaussian truncation number N (e.g. 320 for
+        N320/O320).  Used when ``GRIB_N`` is missing for xarray inputs and
+        when :meth:`regularize_values` is called without a per-call
+        ``grid_number``.  When both metadata and this attribute are
+        absent, a heuristic based on the equatorial row length is used.
     cache:
         Enable xarray metadata plan cache.  When ``True``, repeated
         calls on same-structure DataArray reuse parsed ``GRIB_pl``, inferred
@@ -155,7 +161,7 @@ class GaussRegularizer:
     """
 
     method: str = "linear"
-    default_np_value: Optional[int] = None
+    grid_number: Optional[int] = None
     cache: bool = False
     max_plan_cache: int = 32
     _xarray_plan_cache: dict[tuple, dict[str, Any]] = field(
@@ -168,7 +174,12 @@ class GaussRegularizer:
         """Clear internal xarray plan cache."""
         self._xarray_plan_cache.clear()
 
-    def _build_xarray_plan(self, dataarray, nlon: Optional[int], grid_type_hint: Optional[str]) -> dict[str, Any]:
+    def _build_xarray_plan(
+        self,
+        dataarray: "xr.DataArray",
+        nlon: Optional[int],
+        grid_type_hint: Optional[str],
+    ) -> dict[str, Any]:
         attrs = dict(dataarray.attrs)
         hint = None if grid_type_hint is None else str(
             grid_type_hint).strip().lower()
@@ -191,12 +202,14 @@ class GaussRegularizer:
 
         pl = _to_int32_pl(attrs["GRIB_pl"])
         missval = float(attrs.get("GRIB_missingValue", np.nan))
-        np_value = int(attrs.get("GRIB_N", self.default_np_value or 0) or 0)
 
-        if nlon is None:
-            nlon_val = int(_core.infer_nlon(pl, np_value, 0.0, 359.9999))
-        else:
-            nlon_val = int(nlon)
+        # Determine truncation N (np_value) in order of preference:
+        # 1) GRIB_N from metadata when present and non-zero;
+        # 2) the regulariser's grid_number attribute when set;
+        # 3) 0, which triggers the equatorial-row heuristic in infer_nlon.
+        np_value = int(attrs.get("GRIB_N", 0) or self.grid_number or 0)
+
+        nlon_val = int(_core.infer_nlon(pl, np_value, 0.0, 359.9999)) if nlon is None else int(nlon)
 
         expected = int(pl.sum())
         lead_dims = tuple(dataarray.dims[:-1])
@@ -289,7 +302,10 @@ class GaussRegularizer:
         grid_number:
             Gaussian truncation number N (e.g. 320 for N320 or O320).
             Needed only to distinguish global vs. regional grids and to infer
-            *nlon* for sub-areas.  Falls back to ``self.default_np_value``.
+            *nlon* for sub-areas when metadata does not provide it.  If
+            omitted, this falls back to the regulariser's ``grid_number``
+            attribute when set, otherwise to a heuristic based on equatorial
+            row length (``np_in = 0``).
         xfirst:
             Longitude of the first grid point in degrees.  Default ``0.0``.
         xlast:
@@ -318,12 +334,13 @@ class GaussRegularizer:
         pl_arr = _to_int32_pl(pl)
         method_name = _normalize_method(method, default=self.method)
         nearest_flag = method_name == "nearest"
-        np_in = int(self.default_np_value or 0) if grid_number is None else int(
-            grid_number)
 
-        if nlon is None:
-            nlon = int(_core.infer_nlon(
-                pl_arr, np_in, float(xfirst), float(xlast)))
+        # Determine truncation N (np_in) for the numeric path.  Per-call
+        # grid_number wins; then the regulariser's grid_number attribute;
+        # finally 0 (equatorial-row heuristic).
+        np_in = int(grid_number or self.grid_number or 0)
+
+        nlon = int(_core.infer_nlon(pl_arr, np_in, float(xfirst), float(xlast))) if nlon is None else int(nlon)
         if nlon <= 0:
             raise ValueError("nlon must be positive")
 
@@ -364,12 +381,12 @@ class GaussRegularizer:
 
     def regularize_xarray(
         self,
-        dataarray,
+        dataarray: "xr.DataArray",
         nlon: Optional[int] = None,
         method: Optional[str] = None,
         grid_type_hint: Optional[str] = None,
         fast: bool = False,
-    ):
+    ) -> "xr.DataArray":
         """Interpolate an xarray DataArray from reduced to regular Gaussian grid.
 
         The DataArray must carry ``GRIB_pl`` in its ``.attrs`` (present by
@@ -413,17 +430,18 @@ class GaussRegularizer:
         cache_key = None
         plan = None
         if self.cache:
-            # Use shape + dims + GRIB_pl + requested nlon as cache key.
-            raw_pl = np.asarray(dataarray.attrs.get(
-                "GRIB_pl", []), dtype=np.int32)
+            # Use shape + dims + GRIB_pl + effective N + requested nlon as key.
+            raw_pl = np.asarray(dataarray.attrs.get("GRIB_pl", []), dtype=np.int32)
+            np_key = int(dataarray.attrs.get("GRIB_N", 0) or self.grid_number or 0)
             cache_key = (
                 tuple(dataarray.dims),
                 tuple(dataarray.shape),
                 int(nlon) if nlon is not None else -1,
                 raw_pl.tobytes(),
-                int(dataarray.attrs.get("GRIB_N", self.default_np_value or 0) or 0),
-                str(grid_type_hint).strip().lower(
-                ) if grid_type_hint is not None else "",
+                np_key,
+                str(grid_type_hint).strip().lower()
+                if grid_type_hint is not None
+                else "",
             )
             plan = self._xarray_plan_cache.get(cache_key)
 
@@ -502,12 +520,12 @@ class GaussRegularizer:
 
     def regularize_dataset(
         self,
-        dataset,
+        dataset: "xr.Dataset",
         nlon: Optional[int] = None,
         method: Optional[str] = None,
         grid_type_hint: Optional[str] = None,
         fast: bool = False,
-    ):
+    ) -> "xr.Dataset":
         """Interpolate all convertible variables in an xarray Dataset.
 
         Variables that do not look like reduced Gaussian fields are kept
@@ -549,7 +567,11 @@ class GaussRegularizer:
             method, default=self.method)
         return out_ds
 
-    def regularize(self, data: Any, **kwargs):
+    def regularize(
+        self,
+        data: Any,
+        **kwargs: Any,
+    ) -> Union["xr.Dataset", "xr.DataArray", Tuple[np.ndarray, np.ndarray]]:
         """Auto-detect input type and delegate to the appropriate method.
 
         Parameters
@@ -655,12 +677,12 @@ def regularize_values(
 
 
 def regularize_xarray(
-    dataarray,
+    dataarray: "xr.DataArray",
     method: str = "linear",
     nlon: Optional[int] = None,
     grid_type_hint: Optional[str] = None,
     fast: bool = False,
-):
+) -> "xr.DataArray":
     """Module-level shortcut — see :meth:`GaussRegularizer.regularize_xarray`.
 
     Parameters
@@ -692,12 +714,12 @@ def regularize_xarray(
 
 
 def regularize_dataset(
-    dataset,
+    dataset: "xr.Dataset",
     method: str = "linear",
     nlon: Optional[int] = None,
     grid_type_hint: Optional[str] = None,
     fast: bool = False,
-):
+) -> "xr.Dataset":
     """Module-level shortcut — see :meth:`GaussRegularizer.regularize_dataset`."""
     return _DEFAULT.regularize_dataset(
         dataset,

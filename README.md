@@ -199,8 +199,7 @@ Main converter class.
 
 #### Parameters:
 - **`method`** (str, default="linear"): Interpolation method, either `"linear"` or `"nearest"`
-- **`fast`** (bool, default=False): Skip per-row missing-value detection for speed. Use only when input has no missing values. Typical speedup: ~1.8x.
-- **`default_np_value`** (int, optional): Default Gaussian truncation number N (e.g., 320). Used only if grid metadata doesn't specify it
+- **`grid_number`** (int, optional): Default Gaussian truncation number N (e.g., 320 for N320/O320). Used when `GRIB_N` is missing for xarray inputs and as a fallback when `regularize_values` is called without a per-call `grid_number`. When neither metadata nor this attribute provide N, a heuristic based on the equatorial row length is used
 - **`cache`** (bool, default=False): Enable xarray metadata plan caching for repeated calls on same-structure data
 - **`max_plan_cache`** (int, default=32): Maximum number of cached conversion plans
 
