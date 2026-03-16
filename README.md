@@ -1,5 +1,11 @@
 # GaussRegular
 
+<div align="center">
+  <a href="https://github.com/QianyeSu/GaussRegular">
+    <img src="https://raw.githubusercontent.com/QianyeSu/GaussRegular/main/assets/logo.svg" alt="GaussRegular Logo" width="400">
+  </a>
+</div>
+
 A lightweight, high-performance Python library for converting ECMWF reduced Gaussian grids (N-grids and O-grids) to regular Gaussian grids. Designed for efficient in-memory processing with zero intermediate file I/O.
 
 ## 🔴 Missing Values and Fast Mode
