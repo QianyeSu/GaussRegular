@@ -359,8 +359,3 @@ Contributions welcome! Please:
 2. Write tests for new features
 3. Ensure CI passes before submitting PR
 
-## Related Projects
-
-- **CDO** (Climate Data Operators) — Original algorithms
-- **cfgrib** — GRIB2 file reading
-- **xarray** — Array metadata and labels
