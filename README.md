@@ -280,8 +280,7 @@ See `GRID_TYPE_FULL_NAMES` in the API for the full list.
 - Enable `cache=True` when processing multiple DataArrays with identical structure to reuse parsed metadata.
 
 Typical throughput:
-- N320 data (bilinear): ~100M points/second (safe mode), ~180M points/sec (fast mode)
-- N640 data (bilinear): ~80M points/second (safe mode), ~150M points/sec (fast mode)
+ - On a typical ERA5 model-level example (4 time steps × 137 levels, N96/O96 grids), a full-field linear interpolation runs in ~0.24 s on a modern desktop CPU
 
 ## Limitations
 
