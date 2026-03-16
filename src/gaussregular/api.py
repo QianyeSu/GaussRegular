@@ -209,19 +209,24 @@ class GaussRegularizer:
         # 3) 0, which triggers the equatorial-row heuristic in infer_nlon.
         np_value = int(attrs.get("GRIB_N", 0) or self.grid_number or 0)
 
-        nlon_val = int(_core.infer_nlon(pl, np_value, 0.0, 359.9999)) if nlon is None else int(nlon)
+        nlon_val = int(_core.infer_nlon(pl, np_value, 0.0,
+                       359.9999)) if nlon is None else int(nlon)
 
         expected = int(pl.sum())
         lead_dims = tuple(dataarray.dims[:-1])
 
         lat_1d = None
+        lat_attrs: dict = {}
         target_size = int(pl.size)
 
         # 1) Name-based quick check for common latitude coordinate names.
         for cand in ("latitude", "lat"):
             if cand in dataarray.coords:
-                lat_1d = _extract_lat_1d(dataarray.coords[cand].values, target_size)
+                lat_1d = _extract_lat_1d(
+                    dataarray.coords[cand].values, target_size)
                 if lat_1d is not None:
+                    lat_attrs = dict(
+                        getattr(dataarray.coords[cand], "attrs", {}))
                     break
 
         # 2) Fallback: search coords with CF-style metadata (standard_name/units)
@@ -234,10 +239,26 @@ class GaussRegularizer:
                 if standard_name == "latitude" or "degrees_north" in units:
                     lat_1d = _extract_lat_1d(coord.values, target_size)
                     if lat_1d is not None:
+                        lat_attrs = dict(attrs_c)
                         break
 
         if lat_1d is None or lat_1d.size != int(pl.size):
             lat_1d = np.arange(int(pl.size), dtype=np.float64)
+
+        # Collect longitude attrs from input if present.
+        lon_attrs: dict = {}
+        for cand in ("longitude", "lon"):
+            if cand in dataarray.coords:
+                lon_attrs = dict(getattr(dataarray.coords[cand], "attrs", {}))
+                break
+        if not lon_attrs:
+            for coord in dataarray.coords.values():
+                attrs_c = getattr(coord, "attrs", {})
+                standard_name = str(attrs_c.get("standard_name", "")).lower()
+                units = str(attrs_c.get("units", "")).lower()
+                if standard_name == "longitude" or "degrees_east" in units:
+                    lon_attrs = dict(attrs_c)
+                    break
 
         lon_1d = np.linspace(0.0, 360.0, nlon_val,
                              endpoint=False, dtype=np.float64)
@@ -254,6 +275,8 @@ class GaussRegularizer:
             "lead_dims": lead_dims,
             "lat_1d": lat_1d,
             "lon_1d": lon_1d,
+            "lat_attrs": lat_attrs,
+            "lon_attrs": lon_attrs,
             "is_global": is_global,
         }
 
@@ -267,7 +290,7 @@ class GaussRegularizer:
         xfirst: float = 0.0,
         xlast: float = 359.9999,
         method: Optional[str] = None,
-        fast: bool = False,
+        fast: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Interpolate a flat reduced Gaussian array to a regular longitude grid.
 
@@ -340,7 +363,8 @@ class GaussRegularizer:
         # finally 0 (equatorial-row heuristic).
         np_in = int(grid_number or self.grid_number or 0)
 
-        nlon = int(_core.infer_nlon(pl_arr, np_in, float(xfirst), float(xlast))) if nlon is None else int(nlon)
+        nlon = int(_core.infer_nlon(pl_arr, np_in, float(xfirst),
+                   float(xlast))) if nlon is None else int(nlon)
         if nlon <= 0:
             raise ValueError("nlon must be positive")
 
@@ -385,7 +409,7 @@ class GaussRegularizer:
         nlon: Optional[int] = None,
         method: Optional[str] = None,
         grid_type_hint: Optional[str] = None,
-        fast: bool = False,
+        fast: bool = True,
     ) -> "xr.DataArray":
         """Interpolate an xarray DataArray from reduced to regular Gaussian grid.
 
@@ -431,8 +455,10 @@ class GaussRegularizer:
         plan = None
         if self.cache:
             # Use shape + dims + GRIB_pl + effective N + requested nlon as key.
-            raw_pl = np.asarray(dataarray.attrs.get("GRIB_pl", []), dtype=np.int32)
-            np_key = int(dataarray.attrs.get("GRIB_N", 0) or self.grid_number or 0)
+            raw_pl = np.asarray(dataarray.attrs.get(
+                "GRIB_pl", []), dtype=np.int32)
+            np_key = int(dataarray.attrs.get("GRIB_N", 0)
+                         or self.grid_number or 0)
             cache_key = (
                 tuple(dataarray.dims),
                 tuple(dataarray.shape),
@@ -464,6 +490,8 @@ class GaussRegularizer:
         lat_1d = plan["lat_1d"]
         lon_1d = plan["lon_1d"]
         is_global = bool(plan["is_global"])
+        lat_attrs = dict(plan["lat_attrs"])
+        lon_attrs = dict(plan["lon_attrs"])
         method_name = _normalize_method(method, default=self.method)
         nearest_flag = method_name == "nearest"
 
@@ -503,8 +531,8 @@ class GaussRegularizer:
 
         coords = {d: dataarray.coords[d]
                   for d in lead_dims if d in dataarray.coords}
-        coords["latitude"] = lat_1d
-        coords["longitude"] = lon_1d
+        coords["latitude"] = xr.Variable("latitude", lat_1d, attrs=lat_attrs)
+        coords["longitude"] = xr.Variable("longitude", lon_1d, attrs=lon_attrs)
 
         out_da = xr.DataArray(
             out,
@@ -515,7 +543,7 @@ class GaussRegularizer:
         )
         out_da.attrs["gaussregular_converted"] = "reduced_to_regular"
         out_da.attrs["gaussregular_mode"] = method_name
-        out_da.attrs["gaussregular_is_global"] = is_global
+        out_da.attrs["gaussregular_is_global"] = int(is_global)
         return out_da
 
     def regularize_dataset(
@@ -524,7 +552,7 @@ class GaussRegularizer:
         nlon: Optional[int] = None,
         method: Optional[str] = None,
         grid_type_hint: Optional[str] = None,
-        fast: bool = False,
+        fast: bool = True,
     ) -> "xr.Dataset":
         """Interpolate all convertible variables in an xarray Dataset.
 
@@ -630,7 +658,7 @@ def regularize_values(
     grid_number: Optional[int] = None,
     xfirst: float = 0.0,
     xlast: float = 359.9999,
-    fast: bool = False,
+    fast: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Module-level shortcut — see :meth:`GaussRegularizer.regularize_values`.
 
@@ -681,7 +709,7 @@ def regularize_xarray(
     method: str = "linear",
     nlon: Optional[int] = None,
     grid_type_hint: Optional[str] = None,
-    fast: bool = False,
+    fast: bool = True,
 ) -> "xr.DataArray":
     """Module-level shortcut — see :meth:`GaussRegularizer.regularize_xarray`.
 
@@ -718,7 +746,7 @@ def regularize_dataset(
     method: str = "linear",
     nlon: Optional[int] = None,
     grid_type_hint: Optional[str] = None,
-    fast: bool = False,
+    fast: bool = True,
 ) -> "xr.Dataset":
     """Module-level shortcut — see :meth:`GaussRegularizer.regularize_dataset`."""
     return _DEFAULT.regularize_dataset(

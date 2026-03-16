@@ -167,23 +167,21 @@ print(f"Longitude range: {lon[0]:.2f}–{lon[-1]:.2f}°E")
 
 The library automatically infers the output longitude count based on the regional bounds.
 
-### Advanced: Fast Mode (Skip Missing-Value Detection)
+### Advanced: Fast Mode (Default)
 
-If your input is guaranteed to have **no missing values**, enable `fast=True` to skip per-row missing-value detection for ~1.8x speedup:
+By default `fast=True` is used for best performance. The linear interpolation kernel handles missing values (NaN / sentinel) correctly even in fast mode — if both interpolation neighbors are missing the output is missing, otherwise the valid neighbor is used. Set `fast=False` only if you need per-row missing-value scanning for strict correctness on exotic sentinel values:
 
 ```python
 import gaussregular as gr
 
 engine = gr.GaussRegularizer(method="linear", cache=True)
 
-# Standard mode with missing-value checking
-regular_ds_safe = engine.regularize_dataset(ds, fast=False)  # Default
+# Default: fast=True — recommended for all ERA5/GRIB data
+regular_ds = engine.regularize_dataset(ds)
 
-# Fast mode: assumes no missing values (dangerous if false!)
-regular_ds_fast = engine.regularize_dataset(ds, fast=True)  # ~1.8x faster
+# Safe mode: per-row missing-value scan (slower, ~1.8x)
+regular_ds_safe = engine.regularize_dataset(ds, fast=False)
 ```
-
-**Warning:** Use `fast=True` **only** when you are certain the input contains no missing values (NaN, sentinel values, etc.). Incorrect use may produce garbage output.
 
 ## API Reference
 
@@ -203,27 +201,27 @@ Main converter class.
 - Auto-detects input type (`xr.Dataset`, `xr.DataArray`, or NumPy) and calls appropriate method
 - Returns regularized data in same type as input
 
-**`regularize_values(values, pl, missval, nlon=None, method=None, fast=False)`**
+**`regularize_values(values, pl, missval, nlon=None, method=None, fast=True)`**
 - **`values`**: 1D NumPy array (`len(values) == sum(pl)`)
 - **`pl`**: 1D NumPy array of row lengths (from GRIB_pl)
 - **`missval`**: Missing-value sentinel (float). Points equal to this value (or NaN, if `missval` is NaN) are treated as missing and handled by the interpolation kernel
 - **`nlon`** (optional): Number of columns in output regular grid. Auto-inferred if not provided
 - **`method`** (optional): Per-call method override: `"linear"` or `"nearest"`
-- **`fast`** (optional): Skip missing-value detection when input has no missing values
+- **`fast`** (default=`True`): Per-row missing-value scan toggle. `True` (recommended) lets the interpolation kernel handle NaN/sentinel natively. Set `False` for explicit per-row scanning
 - Returns: `(out, lon)` where `out` is NumPy array and `lon` is longitude vector
 
-**`regularize_xarray(dataarray, nlon=None, grid_type_hint=None, method=None, fast=False)`**
+**`regularize_xarray(dataarray, nlon=None, grid_type_hint=None, method=None, fast=True)`**
 - **`dataarray`**: xarray.DataArray with GRIB metadata in `.attrs`
 - Requires: `GRIB_pl` attribute. If `GRIB_missingValue` is present it is used as `missval`; otherwise NaN values are treated as missing
 - **`method`** (optional): Per-call method override: `"linear"` or `"nearest"`
-- **`fast`** (optional): Skip missing-value detection when input has no missing values
+- **`fast`** (default=`True`): Per-row missing-value scan toggle
 - Returns: xarray.DataArray with regularized data and preserved coordinates
 
-**`regularize_dataset(dataset, nlon=None, grid_type_hint=None, method=None, fast=False)`**
+**`regularize_dataset(dataset, nlon=None, grid_type_hint=None, method=None, fast=True)`**
 - **`dataset`**: xarray.Dataset with one or more reduced Gaussian variables
 - Converts each convertible variable and keeps non-convertible variables unchanged
 - **`method`** (optional): Per-call method override: `"linear"` or `"nearest"`
-- **`fast`** (optional): Skip missing-value detection when input has no missing values
+- **`fast`** (default=`True`): Per-row missing-value scan toggle
 - Returns: xarray.Dataset
 
 **`clear_cache()`**
@@ -231,13 +229,13 @@ Main converter class.
 
 ### Module-level Functions
 
-**`regularize_values(values, pl, missval, nlon=None, method="linear", fast=False)`**
+**`regularize_values(values, pl, missval, nlon=None, method="linear", fast=True)`**
 - Standalone function using default regularizer configuration
 
-**`regularize_xarray(dataarray, grid_type_hint=None, method="linear", fast=False)`**
+**`regularize_xarray(dataarray, grid_type_hint=None, method="linear", fast=True)`**
 - Standalone function using default regularizer configuration
 
-**`regularize_dataset(dataset, grid_type_hint=None, method="linear", fast=False)`**
+**`regularize_dataset(dataset, grid_type_hint=None, method="linear", fast=True)`**
 - Standalone function using default regularizer configuration
 
 ## Grid Specifics
@@ -273,8 +271,8 @@ See `GRID_TYPE_FULL_NAMES` in the API for the full list.
 - **`method="nearest"`**: Nearest-neighbor. Faster, less smooth.
 
 ### Missing-Value Detection
-- **`fast=False` (default)**: Safe mode. Detects missing values in each row and handles them gracefully (~11.8 sec for N320 ERA5 example).
-- **`fast=True`**: Speed mode. Skips per-row missing-value detection and assumes no missing values exist. **Only use when input has no missing values.** Typical speedup: ~1.8x (~6.3 sec for same example).
+- **`fast=True` (default)**: Recommended mode. The linear interpolation kernel correctly propagates missing values at boundaries (both neighbors missing → output missing). Provides maximum throughput.
+- **`fast=False`**: Per-row missing-value scan before interpolation. Use only if you have exotic non-NaN sentinel values that require explicit detection. Typical slowdown: ~1.8x.
 
 ### Caching
 - Enable `cache=True` when processing multiple DataArrays with identical structure to reuse parsed metadata.
@@ -284,7 +282,7 @@ Typical throughput:
 
 ## Limitations
 
-1. **Missing values must be consistently marked** — via NaN or a numeric `missval`/`GRIB_missingValue`; when `fast=True` you must guarantee there are no missing values
+1. **Missing values are propagated by the interpolation kernel** — NaN/sentinel inputs produce NaN outputs at affected grid points by default (`fast=True`). For strict per-row scanning use `fast=False`
 2. **Requires GRIB metadata** — `pl` array must be provided or in DataArray attrs
 3. **Supports only Gaussian grids** — other map projections not supported
 4. **Precision**: Outputs double-precision computation; results cast back to input dtype
