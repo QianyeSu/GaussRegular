@@ -1,6 +1,7 @@
 from .api import (
     GRID_TYPE_FULL_NAMES,
     GaussRegularizer,
+    regularize_dataset,
     regularize_values,
     regularize_xarray,
 )
@@ -8,6 +9,7 @@ from .api import (
 __all__ = [
     "GRID_TYPE_FULL_NAMES",
     "GaussRegularizer",
+    "regularize_dataset",
     "regularize_values",
     "regularize_xarray",
 ]

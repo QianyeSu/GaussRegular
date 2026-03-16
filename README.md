@@ -61,16 +61,17 @@ values = np.random.rand(1040640)  # Example: N320 reduced grid
 pl = np.array([20, 27, 36, 40, 45, ..., 360, 360], dtype=np.int32)  # 161 entries for N320
 
 # Create regularizer
-regularizer = gr.GaussRegularizer(nearest=False)
+regularizer = gr.GaussRegularizer(method="linear")
 
 # Convert to regular Gaussian (2D array)
-regular_data = regularizer.regularize_values(
+regular_data, lon = regularizer.regularize_values(
     values=values,
     pl=pl,
     missval=np.nan
 )
 
 print(f"Output shape: {regular_data.shape}")  # (161, 320) for N320
+print(f"Longitude points: {lon.size}")
 ```
 
 ### Case 2: xarray DataArray (from cfgrib)
@@ -86,7 +87,7 @@ ds = xr.open_dataset("era5_sample.grib", engine="cfgrib")
 da = ds["temperature"]  # xarray.DataArray
 
 # Create regularizer
-regularizer = gr.GaussRegularizer(nearest=False, cache=True)
+regularizer = gr.GaussRegularizer(method="linear", cache=True)
 
 # Convert directly
 regular_da = regularizer.regularize_xarray(da)
@@ -105,17 +106,89 @@ Batch processing with leading dimensions:
 import xarray as xr
 import gaussregular as gr
 
-# Multi-dimensional xarray: (time, level, latitude_reduced, longitude_reduced)
+# Multi-dimensional xarray: (time, level, values)
 ds = xr.open_dataset("era5_multi_level.grib", engine="cfgrib")
 da = ds["temperature"]  # Shape: (24, 137, 1040640)
 
-regularizer = gr.GaussRegularizer(nearest=False, cache=True)
+regularizer = gr.GaussRegularizer(method="linear", cache=True)
 regular_da = regularizer.regularize_xarray(da)
 
 print(f"Output shape: {regular_da.shape}")  # (24, 137, 161, 320) for N320
 ```
 
 The regularizer automatically handles reshaping and maintains coordinate dimensions.
+
+### Case 4: xarray Dataset (Multiple Variables)
+
+You can pass a full `xr.Dataset` directly. All convertible reduced-Gaussian variables are regularized.
+
+```python
+import xarray as xr
+import gaussregular as gr
+
+ds = xr.open_dataset("era5_multi_vars.grib", engine="cfgrib")
+
+regularizer = gr.GaussRegularizer(method="linear", cache=True)
+regular_ds = regularizer.regularize_dataset(ds)
+
+# Or use auto dispatch:
+# regular_ds = regularizer.regularize(ds)
+
+print(regular_ds)
+```
+
+### Case 5: Regional Sub-area Data
+
+For data covering only a portion of the globe (e.g., a regional cut from a model run), specify the longitude bounds and grid number:
+
+```python
+import numpy as np
+import gaussregular as gr
+
+# Regional reduced Gaussian data
+values = np.random.rand(342080)  # Subset of N320 (e.g., Europe region)
+pl = np.array([...])  # Row lengths for the region
+
+regularizer = gr.GaussRegularizer(method="linear")
+
+# Specify regional bounds and grid number for proper output sizing
+regular_data, lon = regularizer.regularize_values(
+    values=values,
+    pl=pl,
+    missval=np.nan,
+    grid_number=320,  # N320 grid
+    xfirst=0.0,       # Start longitude (degrees east)
+    xlast=40.0,       # End longitude (degrees east)
+)
+
+print(f"Regional grid shape: {regular_data.shape}")
+print(f"Longitude range: {lon[0]:.2f}–{lon[-1]:.2f}°E")
+```
+
+**Parameters for regional data:**
+- **`grid_number`** (int): Gaussian truncation number (e.g., 320 for N320). Required to distinguish global vs. regional grids.
+- **`xfirst`** (float, default=0.0): Longitude of the first data point (degrees east, range 0–360).
+- **`xlast`** (float, default=359.9999): Longitude of the last data point (degrees east).
+
+The library automatically infers the output longitude count based on the regional bounds.
+
+### Advanced: Fast Mode (Skip Missing-Value Detection)
+
+If your input is guaranteed to have **no missing values**, enable `fast=True` to skip per-row missing-value detection for ~1.8x speedup:
+
+```python
+import gaussregular as gr
+
+engine = gr.GaussRegularizer(method="linear", cache=True)
+
+# Standard mode with missing-value checking
+regular_ds_safe = engine.regularize_dataset(ds, fast=False)  # Default
+
+# Fast mode: assumes no missing values (dangerous if false!)
+regular_ds_fast = engine.regularize_dataset(ds, fast=True)  # ~1.8x faster
+```
+
+**Warning:** Use `fast=True` **only** when you are certain the input contains no missing values (NaN, sentinel values, etc.). Incorrect use may produce garbage output.
 
 ## API Reference
 
@@ -124,39 +197,53 @@ The regularizer automatically handles reshaping and maintains coordinate dimensi
 Main converter class.
 
 #### Parameters:
-- **`nearest`** (bool, default=False): Use nearest-neighbour instead of bilinear interpolation
+- **`method`** (str, default="linear"): Interpolation method, either `"linear"` or `"nearest"`
+- **`fast`** (bool, default=False): Skip per-row missing-value detection for speed. Use only when input has no missing values. Typical speedup: ~1.8x.
 - **`default_np_value`** (int, optional): Default Gaussian truncation number N (e.g., 320). Used only if grid metadata doesn't specify it
 - **`cache`** (bool, default=False): Enable xarray metadata plan caching for repeated calls on same-structure data
 - **`max_plan_cache`** (int, default=32): Maximum number of cached conversion plans
 
 #### Methods:
 
-**`regularize(data, nlon=None, grid_type_hint=None)`**
-- Auto-detects input type (xarray or NumPy) and calls appropriate method
+**`regularize(data, nlon=None, grid_type_hint=None, method=None)`**
+- Auto-detects input type (`xr.Dataset`, `xr.DataArray`, or NumPy) and calls appropriate method
 - Returns regularized data in same type as input
 
-**`regularize_values(values, pl, missval, nlon=None, nearest=None)`**
-- **`values`**: 1D or N-D NumPy array (flattened last dimension is grid points)
+**`regularize_values(values, pl, missval, nlon=None, method=None, fast=False)`**
+- **`values`**: 1D NumPy array (`len(values) == sum(pl)`)
 - **`pl`**: 1D NumPy array of row lengths (from GRIB_pl)
 - **`missval`**: Missing value sentinel (float). **Input must NOT contain this value**
 - **`nlon`** (optional): Number of columns in output regular grid. Auto-inferred if not provided
-- **`nearest`** (optional): Override instance setting for this call only
-- Returns: NumPy array with same dtype as input
+- **`method`** (optional): Per-call method override: `"linear"` or `"nearest"`
+- **`fast`** (optional): Skip missing-value detection when input has no missing values
+- Returns: `(out, lon)` where `out` is NumPy array and `lon` is longitude vector
 
-**`regularize_xarray(dataarray, nlon=None, grid_type_hint=None, nearest=None)`**
+**`regularize_xarray(dataarray, nlon=None, grid_type_hint=None, method=None, fast=False)`**
 - **`dataarray`**: xarray.DataArray with GRIB metadata in `.attrs`
 - Requires: `GRIB_pl` and `GRIB_missingValue` attributes
+- **`method`** (optional): Per-call method override: `"linear"` or `"nearest"`
+- **`fast`** (optional): Skip missing-value detection when input has no missing values
 - Returns: xarray.DataArray with regularized data and preserved coordinates
+
+**`regularize_dataset(dataset, nlon=None, grid_type_hint=None, method=None, fast=False)`**
+- **`dataset`**: xarray.Dataset with one or more reduced Gaussian variables
+- Converts each convertible variable and keeps non-convertible variables unchanged
+- **`method`** (optional): Per-call method override: `"linear"` or `"nearest"`
+- **`fast`** (optional): Skip missing-value detection when input has no missing values
+- Returns: xarray.Dataset
 
 **`clear_cache()`**
 - Clears internal xarray plan cache
 
 ### Module-level Functions
 
-**`regularize_values(values, pl, missval, nlon=None, nearest=False)`**
+**`regularize_values(values, pl, missval, nlon=None, method="linear", fast=False)`**
 - Standalone function using default regularizer configuration
 
-**`regularize_xarray(dataarray, grid_type_hint=None, nearest=False)`**
+**`regularize_xarray(dataarray, grid_type_hint=None, method="linear", fast=False)`**
+- Standalone function using default regularizer configuration
+
+**`regularize_dataset(dataset, grid_type_hint=None, method="linear", fast=False)`**
 - Standalone function using default regularizer configuration
 
 ## Grid Specifics
@@ -185,16 +272,22 @@ GaussRegular recognizes many GRIB metadata variants:
 
 See `GRID_TYPE_FULL_NAMES` in the API for the full list.
 
-## Performance Notes
+## Performance Tuning
 
-- **C extension backend**: Core interpolation is compiled from proven CDO algorithms for maximum speed
-- **Bilinear vs. Nearest**: Bilinear is slightly slower but more accurate; nearest-neighbour is faster
-- **Batching**: Processing multi-dimensional data (time, level) is more efficient than repeated 1D conversions
-- **Caching**: Enable `cache=True` for repeated calls on identically-structured data
+### Interpolation Method
+- **`method="linear"` (default)**: Bilinear interpolation. Slightly slower but more accurate.
+- **`method="nearest"`**: Nearest-neighbor. Faster, less smooth.
+
+### Missing-Value Detection
+- **`fast=False` (default)**: Safe mode. Detects missing values in each row and handles them gracefully (~11.8 sec for N320 ERA5 example).
+- **`fast=True`**: Speed mode. Skips per-row missing-value detection and assumes no missing values exist. **Only use when input has no missing values.** Typical speedup: ~1.8x (~6.3 sec for same example).
+
+### Caching
+- Enable `cache=True` when processing multiple DataArrays with identical structure to reuse parsed metadata.
 
 Typical throughput:
-- N320 data: ~100M points/second (bilinear)
-- N640 data: ~80M points/second (bilinear)
+- N320 data (bilinear): ~100M points/second (safe mode), ~180M points/sec (fast mode)
+- N640 data (bilinear): ~80M points/second (safe mode), ~150M points/sec (fast mode)
 
 ## Limitations
 
@@ -210,6 +303,7 @@ See the `examples/` directory (not in wheel) for:
 - `run_era5_demo.py` — Real ERA5 data conversion
 - `test_real_numpy_xarray.py` — Detailed input validation examples
 - `benchmark_speed.py` — Performance benchmarking
+- `benchmark_dataset_fast_nomissing.py` — Fast mode demonstration with speedup measurement
 
 ## Testing & Validation
 
@@ -255,7 +349,7 @@ If you use GaussRegular in research, please cite:
 - Check data before calling GaussRegular
 
 ### Performance is slower than expected
-- Ensure you're not calling with `nearest=True` unless necessary
+- Use `method="linear"` unless you specifically want nearest-neighbour behavior
 - Use caching: `regularizer.cache=True` for repeated calls
 - Profile with larger batch operations instead of single conversions
 

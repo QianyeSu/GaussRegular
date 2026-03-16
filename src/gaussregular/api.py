@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Tuple
 
 import numpy as np
-
+import xarray as xr
 from . import _core
 
 
@@ -29,6 +29,7 @@ GRID_TYPE_FULL_NAMES = {
 }
 
 REDUCED_GAUSSIAN_ALIASES = set(GRID_TYPE_FULL_NAMES)
+VALID_METHODS = {"linear", "nearest"}
 
 
 def _supported_grid_types_message() -> str:
@@ -45,6 +46,14 @@ def _to_int32_pl(pl: Iterable[int]) -> np.ndarray:
     if np.any(arr <= 0):
         raise ValueError("pl must contain positive integers")
     return arr
+
+
+def _normalize_method(method: Optional[str], default: str = "linear") -> str:
+    chosen = default if method is None else str(method).strip().lower()
+    if chosen not in VALID_METHODS:
+        supported = ", ".join(sorted(VALID_METHODS))
+        raise ValueError(f"method must be one of: {supported}")
+    return chosen
 
 
 def _is_supported_reduced_grid(attrs: dict[str, Any]) -> bool:
@@ -85,9 +94,10 @@ class GaussRegularizer:
 
     Parameters
     ----------
-    nearest:
-            Use nearest-neighbour interpolation instead of bilinear.  Matches CDO
-            ``setgridtype,regularnn``.
+    method:
+        Interpolation method. ``linear`` (default) matches CDO
+        ``setgridtype,regular``; ``nearest`` matches CDO
+        ``setgridtype,regularnn``.
     default_np_value:
         Default Gaussian truncation number N (e.g. 320 for N320/O320).  Used
         only when *grid_number* is not supplied per-call.
@@ -102,7 +112,8 @@ class GaussRegularizer:
     -------------
     ``engine.regularize(data)`` auto-detects input type:
 
-    - xarray input -> ``regularize_xarray`` path
+    - xarray Dataset input -> ``regularize_dataset`` path
+    - xarray DataArray input -> ``regularize_xarray`` path
     - numpy input -> ``regularize_values`` path (requires ``pl`` and ``missval``)
 
     Example::
@@ -112,12 +123,15 @@ class GaussRegularizer:
         out = engine.regularize(da_day1)
     """
 
-    nearest: bool = False
+    method: str = "linear"
     default_np_value: Optional[int] = None
     cache: bool = False
     max_plan_cache: int = 32
     _xarray_plan_cache: dict[tuple, dict[str, Any]] = field(
         default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.method = _normalize_method(self.method)
 
     def clear_cache(self) -> None:
         """Clear internal xarray plan cache."""
@@ -199,7 +213,8 @@ class GaussRegularizer:
         grid_number: Optional[int] = None,
         xfirst: float = 0.0,
         xlast: float = 359.9999,
-        nearest: Optional[bool] = None,
+        method: Optional[str] = None,
+        fast: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Interpolate a flat reduced Gaussian array to a regular longitude grid.
 
@@ -239,8 +254,11 @@ class GaussRegularizer:
             Longitude of the first grid point in degrees.  Default ``0.0``.
         xlast:
             Longitude of the last grid point in degrees.  Default ``359.9999``.
-        nearest:
-            Per-call override of ``self.nearest``.
+        method:
+            Per-call interpolation method override (``linear`` or ``nearest``).
+        fast:
+            If ``True``, skip row-wise missing-value detection for speed.
+            Use only when input is guaranteed to contain no missing values.
 
         Notes
         -----
@@ -258,7 +276,8 @@ class GaussRegularizer:
             1-D longitude coordinate array of length *nlon*, degrees east.
         """
         pl_arr = _to_int32_pl(pl)
-        nearest_flag = self.nearest if nearest is None else bool(nearest)
+        method_name = _normalize_method(method, default=self.method)
+        nearest_flag = method_name == "nearest"
         np_in = int(self.default_np_value or 0) if grid_number is None else int(
             grid_number)
 
@@ -282,7 +301,7 @@ class GaussRegularizer:
 
         # C extension always returns float64; cast back to input dtype.
         out = _core.regularize_values(
-            vals, pl_arr, float(missval), nearest_flag, int(nlon))
+            vals, pl_arr, float(missval), nearest_flag, int(nlon), bool(fast))
         if orig_dtype != np.float64:
             out = out.astype(orig_dtype, copy=False)
 
@@ -307,8 +326,9 @@ class GaussRegularizer:
         self,
         dataarray,
         nlon: Optional[int] = None,
-        nearest: Optional[bool] = None,
+        method: Optional[str] = None,
         grid_type_hint: Optional[str] = None,
+        fast: bool = False,
     ):
         """Interpolate an xarray DataArray from reduced to regular Gaussian grid.
 
@@ -326,8 +346,11 @@ class GaussRegularizer:
             Override the inferred output longitude count.  When *None* it is
             derived from ``pl[nlat // 2]`` (global grids) or
             ``grib_get_reduced_row`` (regional sub-areas).
-        nearest:
-            Per-call override of ``self.nearest``.
+        method:
+            Per-call interpolation method override (``linear`` or ``nearest``).
+        fast:
+            If ``True``, skip row-wise missing-value detection for speed.
+            Use only when the input has no missing values.
         grid_type_hint:
             Optional manual grid type name when metadata is incomplete.
             Must be one of the supported names listed by
@@ -342,12 +365,6 @@ class GaussRegularizer:
             ``gaussregular_converted``, ``gaussregular_mode``,
             ``gaussregular_is_global``.
         """
-        try:
-            import xarray as xr
-        except Exception as exc:  # pragma: no cover
-            raise ImportError(
-                "xarray is required for regularize_xarray") from exc
-
         if not hasattr(dataarray, "attrs"):
             raise TypeError("dataarray must be an xarray.DataArray")
 
@@ -387,7 +404,8 @@ class GaussRegularizer:
         lat_1d = plan["lat_1d"]
         lon_1d = plan["lon_1d"]
         is_global = bool(plan["is_global"])
-        nearest_flag = self.nearest if nearest is None else bool(nearest)
+        method_name = _normalize_method(method, default=self.method)
+        nearest_flag = method_name == "nearest"
 
         orig_dtype = dataarray.values.dtype
         # Do not force dtype here; the C extension converts internally.
@@ -405,7 +423,7 @@ class GaussRegularizer:
         out = np.empty((batch, int(pl.size), nlon_val), dtype=np.float64)
         for i in range(batch):
             out[i] = _core.regularize_values(
-                flat[i], pl, missval, nearest_flag, nlon_val)
+                flat[i], pl, missval, nearest_flag, nlon_val, bool(fast))
 
         out = out.reshape(*lead_shape, int(pl.size), nlon_val)
 
@@ -428,10 +446,58 @@ class GaussRegularizer:
             attrs=attrs,
         )
         out_da.attrs["gaussregular_converted"] = "reduced_to_regular"
-        out_da.attrs["gaussregular_mode"] = "nearest" if nearest_flag else "linear"
+        out_da.attrs["gaussregular_mode"] = method_name
         out_da.attrs["gaussregular_is_global"] = is_global
         out_da.attrs["gaussregular_plan_cache"] = "on" if self.cache else "off"
         return out_da
+
+    def regularize_dataset(
+        self,
+        dataset,
+        nlon: Optional[int] = None,
+        method: Optional[str] = None,
+        grid_type_hint: Optional[str] = None,
+        fast: bool = False,
+    ):
+        """Interpolate all convertible variables in an xarray Dataset.
+
+        Variables that do not look like reduced Gaussian fields are kept
+        unchanged. For cfgrib datasets where ``GRIB_pl`` is only present in
+        dataset attributes, that metadata is propagated to each variable before
+        conversion.
+        """
+        if not isinstance(dataset, xr.Dataset):
+            raise TypeError("dataset must be an xarray.Dataset")
+
+        out_vars: dict[str, xr.DataArray] = {}
+        for name, da in dataset.data_vars.items():
+            merged_attrs = dict(dataset.attrs)
+            merged_attrs.update(dict(da.attrs))
+
+            if "GRIB_pl" not in merged_attrs:
+                out_vars[name] = da
+                continue
+
+            if not _is_supported_reduced_grid(merged_attrs) and grid_type_hint is None:
+                out_vars[name] = da
+                continue
+
+            work = da.copy(deep=False)
+            work.attrs = merged_attrs
+            out_vars[name] = self.regularize_xarray(
+                work,
+                nlon=nlon,
+                method=method,
+                grid_type_hint=grid_type_hint,
+                fast=fast,
+            )
+
+        out_ds = xr.Dataset(out_vars, attrs=dict(dataset.attrs))
+        out_ds.attrs["gaussregular_converted"] = "reduced_to_regular_dataset"
+        out_ds.attrs["gaussregular_mode"] = _normalize_method(
+            method, default=self.method)
+        out_ds.attrs["gaussregular_plan_cache"] = "on" if self.cache else "off"
+        return out_ds
 
     def regularize(self, data: Any, **kwargs):
         """Auto-detect input type and delegate to the appropriate method.
@@ -439,6 +505,7 @@ class GaussRegularizer:
         Parameters
         ----------
         data:
+                        * ``xarray.Dataset`` → calls :meth:`regularize_dataset`.
             * ``xarray.DataArray`` → calls :meth:`regularize_xarray`.
             * numpy array → calls :meth:`regularize_values` (``pl`` and
               ``missval`` are required keyword arguments in this case).
@@ -447,7 +514,8 @@ class GaussRegularizer:
 
         Returns
         -------
-        For xarray input → ``xarray.DataArray`` on the regular grid.
+        For dataset input → ``xarray.Dataset`` with converted variables.
+        For xarray DataArray input → ``xarray.DataArray`` on the regular grid.
         For numpy input → ``(out, lon)`` tuple.
 
         Examples
@@ -460,7 +528,10 @@ class GaussRegularizer:
 
             out, lon = engine.regularize(values, pl=pl, missval=9.999e20, grid_number=320)
         """
-        # Auto-detect xarray-like objects first.
+        if isinstance(data, xr.Dataset):
+            return self.regularize_dataset(data, **kwargs)
+
+        # Auto-detect xarray DataArray-like objects next.
         if hasattr(data, "attrs") and hasattr(data, "dims") and hasattr(data, "values"):
             return self.regularize_xarray(data, **kwargs)
 
@@ -481,11 +552,12 @@ def regularize_values(
     values: np.ndarray,
     pl: Iterable[int],
     missval: float,
-    nearest: bool = False,
+    method: str = "linear",
     nlon: Optional[int] = None,
     grid_number: Optional[int] = None,
     xfirst: float = 0.0,
     xlast: float = 359.9999,
+    fast: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Module-level shortcut — see :meth:`GaussRegularizer.regularize_values`.
 
@@ -498,9 +570,8 @@ def regularize_values(
         description and N-grid vs. O-grid examples.
     missval:
         Missing-value sentinel (e.g. ``9.999e20``, ``float('nan')``).
-    nearest:
-        ``True`` → nearest-neighbour (CDO ``regularnn``).
-        ``False`` → bilinear (CDO ``setgridtype,regular``).  Default.
+    method:
+        ``linear`` (default) or ``nearest``.
     nlon:
         Output longitude count; inferred from ``pl`` when *None*.
     grid_number:
@@ -509,6 +580,8 @@ def regularize_values(
         First longitude in degrees (default 0.0).
     xlast:
         Last longitude in degrees (default 359.9999).
+    fast:
+        If ``True``, skip row-wise missing-value detection for speed.
 
     Returns
     -------
@@ -521,19 +594,21 @@ def regularize_values(
         values=values,
         pl=pl,
         missval=missval,
-        nearest=nearest,
+        method=method,
         nlon=nlon,
         grid_number=grid_number,
         xfirst=xfirst,
         xlast=xlast,
+        fast=fast,
     )
 
 
 def regularize_xarray(
     dataarray,
-    nearest: bool = False,
+    method: str = "linear",
     nlon: Optional[int] = None,
     grid_type_hint: Optional[str] = None,
+    fast: bool = False,
 ):
     """Module-level shortcut — see :meth:`GaussRegularizer.regularize_xarray`.
 
@@ -542,12 +617,14 @@ def regularize_xarray(
     dataarray:
         ``xarray.DataArray`` on a reduced Gaussian grid with ``GRIB_pl`` in
         attrs (N-grids and O-grids both supported).
-    nearest:
-        ``True`` → nearest-neighbour.  ``False`` → bilinear (default).
+    method:
+        ``linear`` (default) or ``nearest``.
     nlon:
         Override output longitude count.
     grid_type_hint:
         Optional manual grid type name when metadata is incomplete.
+    fast:
+        If ``True``, skip row-wise missing-value detection for speed.
 
     Returns
     -------
@@ -556,7 +633,25 @@ def regularize_xarray(
     """
     return _DEFAULT.regularize_xarray(
         dataarray,
-        nearest=nearest,
+        method=method,
         nlon=nlon,
         grid_type_hint=grid_type_hint,
+        fast=fast,
+    )
+
+
+def regularize_dataset(
+    dataset,
+    method: str = "linear",
+    nlon: Optional[int] = None,
+    grid_type_hint: Optional[str] = None,
+    fast: bool = False,
+):
+    """Module-level shortcut — see :meth:`GaussRegularizer.regularize_dataset`."""
+    return _DEFAULT.regularize_dataset(
+        dataset,
+        method=method,
+        nlon=nlon,
+        grid_type_hint=grid_type_hint,
+        fast=fast,
     )
