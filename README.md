@@ -7,17 +7,6 @@
 
 A lightweight, high-performance Python library for converting ECMWF reduced Gaussian grids (N-grids and O-grids) to regular Gaussian grids. Designed for efficient in-memory processing with zero intermediate file I/O.
 
-## 🔴 Missing Values and Fast Mode
-
-GaussRegular **can** handle missing values (NaN or a numeric sentinel) in its default safe mode. Both interpolation methods:
-
-- treat points equal to `missval` (or NaN, when `missval=np.nan`) as missing;
-- propagate missing values in a controlled way:
-  - `linear`: uses the valid neighbour when one side is missing; if both neighbours are missing, outputs `missval`;
-  - `nearest`: if the nearest point is missing, searches outward until a valid neighbour is found, otherwise outputs `missval`.
-
-For maximum performance when you are **certain** the input has no missing values, set `fast=True`. In this mode, per-row missing-value detection is skipped and any hidden missing values will be treated as regular numbers (behaviour is effectively undefined if missing values are present).
-
 ## Overview
 
 **GaussRegular** specializes in converting ECMWF reduced Gaussian grids to full (regular) Gaussian grids:
