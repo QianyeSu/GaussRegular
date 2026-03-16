@@ -4,6 +4,26 @@
 #include <numpy/arrayobject.h>
 #include <math.h>
 
+/*
+ * gaussregular._core
+ * -------------------
+ *
+ * C implementation of the inner loops for converting ECMWF reduced
+ * Gaussian grids (N-grids / O-grids) to regular Gaussian grids.
+ *
+ * Author : Qianye Su
+ * Email  : suqianye2000@gmail.com
+ * Created: 2026-03-16
+ *
+ * Conventions used here:
+ *   - values are always passed in as 1D float64 arrays in "row-packed"
+ *     order (all points of latitude 0, then latitude 1, ...);
+ *   - pl[j] holds the number of points in latitude row j;
+ *   - output is a dense (nlat, nlon) float64 array in row-major order;
+ *   - missing values are detected via a numeric sentinel 'missval',
+ *     including the special case where missval is NaN.
+ */
+
 /* Check if a value v matches the missing-value sentinel missval.
    Handles both NaN and non-NaN missing values correctly. */
 static int is_missing(double v, double missval)
@@ -13,6 +33,15 @@ static int is_missing(double v, double missval)
     return v == missval;
 }
 
+/*
+ * grib_get_reduced_row
+ * ---------------------
+ * Given a full reduced-Gaussian row with 'pl' grid points over 0..360,
+ * compute how many points fall inside the longitudinal window
+ * [lon_first, lon_last], and the integer start/end indices (ilon_first,
+ * ilon_last) in the reduced row.  This mirrors the behaviour of the
+ * ECMWF GRIB API utility of the same name.
+ */
 static void grib_get_reduced_row(long pl, double lon_first, double lon_last,
                                  long *npoints, long *ilon_first, long *ilon_last)
 {
@@ -84,6 +113,19 @@ static void grib_get_reduced_row(long pl, double lon_first, double lon_last,
         *ilon_first += pl;
 }
 
+/*
+ * reduced_grid_is_global
+ * ----------------------
+ * Decide whether a reduced Gaussian grid should be treated as global.
+ *
+ * np    : Gaussian truncation number (N); controls the theoretical
+ *         meridional resolution (90 / np degrees).
+ * nxmax : maximum number of points per latitude row.
+ * xfirst/xlast : longitudinal data window.
+ *
+ * Returns non-zero when the data window is wide enough to be considered
+ * a global field; otherwise returns 0 (regional / sub-area grid).
+ */
 static int reduced_grid_is_global(int np, int nxmax, double xfirst, double xlast)
 {
     double dx_global = (np > 0) ? (90.0 / np) : 999.0;
@@ -145,10 +187,11 @@ static int regularize_row_linear(const double *src, int src_n, double *dst, int 
     return 0;
 }
 
-/* Nearest-neighbor interpolation: find the closest source point for each destination.
-   If the nearest point is missing and missing values detected, scan outward
-   (alternating forward/backward) to find the nearest valid neighbor.
-   If no valid neighbor exists, mark output as missing. */
+/* Nearest-neighbour interpolation: find the closest source point for each
+   destination index.  When missing values are present, the nearest point
+   may itself be missing; in that case we expand a search radius and look
+   alternately forward/backward until a valid neighbour is found.  If no
+   valid neighbour exists in the row, the output is marked as missing. */
 static int regularize_row_nearest(const double *src, int src_n, double *dst, int dst_n, int has_missing, double missval)
 {
     if (src_n <= 0 || dst_n <= 0)
@@ -210,6 +253,8 @@ static int regularize_row_nearest(const double *src, int src_n, double *dst, int
     return 0;
 }
 
+/* Python wrapper for grib_get_reduced_row.
+   Python signature: reduced_row(pl, xfirst, xlast) -> (npoints, ilon_first, ilon_last). */
 static PyObject *py_reduced_row(PyObject *self, PyObject *args)
 {
     long pl = 0;
@@ -228,6 +273,8 @@ static PyObject *py_reduced_row(PyObject *self, PyObject *args)
     return Py_BuildValue("lll", npoints, ilon_first, ilon_last);
 }
 
+/* Python wrapper around reduced_grid_is_global.
+   Python signature: is_global(np, pl, xfirst, xlast) -> bool. */
 static PyObject *py_is_global(PyObject *self, PyObject *args)
 {
     int np = 0;
@@ -261,6 +308,8 @@ static PyObject *py_is_global(PyObject *self, PyObject *args)
     Py_RETURN_FALSE;
 }
 
+/* Infer the regular-grid longitude count for a reduced Gaussian grid.
+   Python signature: infer_nlon(pl, np, xfirst, xlast) -> nlon. */
 static PyObject *py_infer_nlon(PyObject *self, PyObject *args)
 {
     PyObject *pl_obj = NULL;
@@ -310,6 +359,63 @@ static PyObject *py_infer_nlon(PyObject *self, PyObject *args)
 
     Py_DECREF(pl);
     return PyLong_FromLong((long)nlon);
+}
+
+/* Helper: regularise a single field (one reduced Gaussian grid) into
+   a regular Gaussian grid.
+
+   in_data  : pointer to 1D values, length == sum(pl_data[j])
+   pl_data  : row lengths (points per latitude)
+   nlat     : number of latitude rows
+   nlon     : number of longitudes in the target regular grid
+   missval  : missing-value sentinel
+   nearest  : 0 -> linear, non-zero -> nearest-neighbour
+   fast     : 0 -> scan each row for missing values; non-zero assumes
+              there are no missing values and skips the scan
+   out_data : pointer to preallocated (nlat * nlon) output buffer. */
+static int regularize_field(
+    const double *in_data,
+    const int *pl_data,
+    npy_intp nlat,
+    int nlon,
+    double missval,
+    int nearest,
+    int fast,
+    double *out_data)
+{
+    npy_intp ptr = 0;
+    for (npy_intp j = 0; j < nlat; ++j)
+    {
+        const int src_n = pl_data[j];
+        const double *src = in_data + ptr;
+        double *dst = out_data + j * (npy_intp)nlon;
+
+        /* Detect if this row contains any missing values.
+           Skip detection if fast=1 (assumes input has no missing values). */
+        int has_missing = 0;
+        if (!fast)
+        {
+            for (int k = 0; k < src_n; ++k)
+            {
+                if (is_missing(src[k], missval))
+                {
+                    has_missing = 1;
+                    break;
+                }
+            }
+        }
+
+        int rc = nearest ? regularize_row_nearest(src, src_n, dst, nlon, has_missing, missval)
+                         : regularize_row_linear(src, src_n, dst, nlon, has_missing, missval);
+        if (rc != 0)
+        {
+            return rc;
+        }
+
+        ptr += src_n;
+    }
+
+    return 0;
 }
 
 /* Main Python entry point for grid regularization.
@@ -408,30 +514,112 @@ static PyObject *py_regularize_values(PyObject *self, PyObject *args)
     const double *in_data = (const double *)PyArray_DATA(values);
     double *out_data = (double *)PyArray_DATA(out);
 
-    npy_intp ptr = 0;
+    int rc = regularize_field(in_data, pl_data, nlat, nlon, missval, nearest, fast, out_data);
+    if (rc != 0)
+    {
+        Py_DECREF(values);
+        Py_DECREF(pl);
+        Py_DECREF(out);
+        PyErr_SetString(PyExc_RuntimeError, "row interpolation failed");
+        return NULL;
+    }
+
+    Py_DECREF(values);
+    Py_DECREF(pl);
+    return (PyObject *)out;
+}
+
+/* Batch interface: process a stack of fields in one call.
+   values2d has shape (batch, sum(pl)), out has shape (batch, nlat, nlon). */
+static PyObject *py_regularize_values_batch(PyObject *self, PyObject *args)
+{
+    PyObject *values_obj = NULL;
+    PyObject *pl_obj = NULL;
+    double missval = 0.0;
+    int nearest = 0;
+    int nlon = 0;
+    int fast = 0;
+
+    if (!PyArg_ParseTuple(args, "OOdpi|p", &values_obj, &pl_obj, &missval, &nearest, &nlon, &fast))
+    {
+        return NULL;
+    }
+
+    PyArrayObject *values = (PyArrayObject *)PyArray_FROM_OTF(values_obj, NPY_FLOAT64, NPY_ARRAY_IN_ARRAY);
+    PyArrayObject *pl = (PyArrayObject *)PyArray_FROM_OTF(pl_obj, NPY_INT32, NPY_ARRAY_IN_ARRAY);
+    if (!values || !pl)
+    {
+        Py_XDECREF(values);
+        Py_XDECREF(pl);
+        return NULL;
+    }
+
+    if (PyArray_NDIM(values) != 2)
+    {
+        PyErr_SetString(PyExc_ValueError, "values must be 2D float64 array");
+        Py_DECREF(values);
+        Py_DECREF(pl);
+        return NULL;
+    }
+    if (PyArray_NDIM(pl) != 1)
+    {
+        PyErr_SetString(PyExc_ValueError, "pl must be 1D int32 array");
+        Py_DECREF(values);
+        Py_DECREF(pl);
+        return NULL;
+    }
+    if (nlon <= 0)
+    {
+        PyErr_SetString(PyExc_ValueError, "nlon must be positive");
+        Py_DECREF(values);
+        Py_DECREF(pl);
+        return NULL;
+    }
+
+    npy_intp batch = PyArray_DIM(values, 0);
+    npy_intp nvals = PyArray_DIM(values, 1);
+    npy_intp nlat = PyArray_DIM(pl, 0);
+    const int *pl_data = (const int *)PyArray_DATA(pl);
+
+    npy_intp sum_pl = 0;
     for (npy_intp j = 0; j < nlat; ++j)
     {
-        const int src_n = pl_data[j];
-        const double *src = in_data + ptr;
-        double *dst = out_data + j * nlon;
-
-        /* Detect if this row contains any missing values.
-           Skip detection if fast=1 (assumes input has no missing values). */
-        int has_missing = 0;
-        if (!fast)
+        if (pl_data[j] <= 0)
         {
-            for (int k = 0; k < src_n; ++k)
-            {
-                if (is_missing(src[k], missval))
-                {
-                    has_missing = 1;
-                    break;
-                }
-            }
+            PyErr_SetString(PyExc_ValueError, "pl contains non-positive values");
+            Py_DECREF(values);
+            Py_DECREF(pl);
+            return NULL;
         }
+        sum_pl += pl_data[j];
+    }
 
-        int rc = nearest ? regularize_row_nearest(src, src_n, dst, nlon, has_missing, missval)
-                         : regularize_row_linear(src, src_n, dst, nlon, has_missing, missval);
+    if (nvals != sum_pl)
+    {
+        PyErr_SetString(PyExc_ValueError, "second dimension of values must equal sum(pl)");
+        Py_DECREF(values);
+        Py_DECREF(pl);
+        return NULL;
+    }
+
+    npy_intp out_dims[3] = {batch, nlat, (npy_intp)nlon};
+    PyArrayObject *out = (PyArrayObject *)PyArray_SimpleNew(3, out_dims, NPY_FLOAT64);
+    if (!out)
+    {
+        Py_DECREF(values);
+        Py_DECREF(pl);
+        return NULL;
+    }
+
+    const double *in_data = (const double *)PyArray_DATA(values);
+    double *out_data = (double *)PyArray_DATA(out);
+
+    for (npy_intp b = 0; b < batch; ++b)
+    {
+        const double *in_b = in_data + b * nvals;
+        double *out_b = out_data + b * (nlat * (npy_intp)nlon);
+
+        int rc = regularize_field(in_b, pl_data, nlat, nlon, missval, nearest, fast, out_b);
         if (rc != 0)
         {
             Py_DECREF(values);
@@ -440,7 +628,6 @@ static PyObject *py_regularize_values(PyObject *self, PyObject *args)
             PyErr_SetString(PyExc_RuntimeError, "row interpolation failed");
             return NULL;
         }
-        ptr += src_n;
     }
 
     Py_DECREF(values);
@@ -449,6 +636,8 @@ static PyObject *py_regularize_values(PyObject *self, PyObject *args)
 }
 
 static PyMethodDef methods[] = {
+    {"regularize_values_batch", py_regularize_values_batch, METH_VARARGS,
+     "regularize_values_batch(values2d, pl, missval, nearest, nlon, fast=False) -> 3D float64 array"},
     {"regularize_values", py_regularize_values, METH_VARARGS,
      "regularize_values(values, pl, missval, nearest, nlon, fast=False) -> 2D float64 array"},
     {"reduced_row", py_reduced_row, METH_VARARGS,

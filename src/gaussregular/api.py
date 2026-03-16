@@ -68,6 +68,22 @@ def _is_supported_reduced_grid(attrs: dict[str, Any]) -> bool:
     return False
 
 
+def _extract_lat_1d(values: Any, target_size: int) -> Optional[np.ndarray]:
+    """Normalise latitude coordinate to a 1D array of length target_size.
+
+    Accepts either a 1D latitude vector or a 2D/ND mesh that can be
+    reduced to unique latitude values.
+    """
+    latv = np.asarray(values)
+    if latv.ndim == 1 and latv.size == target_size:
+        return latv.astype(np.float64)
+    if latv.ndim >= 1 and latv.size >= target_size:
+        arr = np.unique(latv.reshape(-1)).astype(np.float64)
+        if arr.size == target_size:
+            return np.sort(arr)[::-1]
+    return None
+
+
 def _require_xarray():
     """Import xarray on demand for xarray-based APIs.
 
@@ -186,17 +202,26 @@ class GaussRegularizer:
         lead_dims = tuple(dataarray.dims[:-1])
 
         lat_1d = None
+        target_size = int(pl.size)
+
+        # 1) Name-based quick check for common latitude coordinate names.
         for cand in ("latitude", "lat"):
             if cand in dataarray.coords:
-                latv = np.asarray(dataarray.coords[cand].values)
-                if latv.ndim == 1 and latv.size == int(pl.size):
-                    lat_1d = latv.astype(np.float64)
-                elif latv.ndim >= 1 and latv.size >= int(pl.size):
-                    lat_1d = np.unique(latv.reshape(-1)).astype(np.float64)
-                    if lat_1d.size == int(pl.size):
-                        lat_1d = np.sort(lat_1d)[::-1]
-                if lat_1d is not None and lat_1d.size == int(pl.size):
+                lat_1d = _extract_lat_1d(dataarray.coords[cand].values, target_size)
+                if lat_1d is not None:
                     break
+
+        # 2) Fallback: search coords with CF-style metadata (standard_name/units)
+        # when latitude coordinate uses a non-standard name.
+        if lat_1d is None:
+            for coord in dataarray.coords.values():
+                attrs_c = getattr(coord, "attrs", {})
+                standard_name = str(attrs_c.get("standard_name", "")).lower()
+                units = str(attrs_c.get("units", "")).lower()
+                if standard_name == "latitude" or "degrees_north" in units:
+                    lat_1d = _extract_lat_1d(coord.values, target_size)
+                    if lat_1d is not None:
+                        break
 
         if lat_1d is None or lat_1d.size != int(pl.size):
             lat_1d = np.arange(int(pl.size), dtype=np.float64)
@@ -437,10 +462,18 @@ class GaussRegularizer:
         batch = int(np.prod(lead_shape)) if lead_shape else 1
         flat = arr.reshape(batch, last)
 
-        out = np.empty((batch, int(pl.size), nlon_val), dtype=np.float64)
-        for i in range(batch):
-            out[i] = _core.regularize_values(
-                flat[i], pl, missval, nearest_flag, nlon_val, bool(fast))
+        try:
+            # Prefer batched C path when available to reduce Python overhead.
+            out = _core.regularize_values_batch(
+                flat, pl, missval, nearest_flag, nlon_val, bool(fast)
+            )
+        except AttributeError:
+            # Fallback for older cores: loop in Python.
+            out = np.empty((batch, int(pl.size), nlon_val), dtype=np.float64)
+            for i in range(batch):
+                out[i] = _core.regularize_values(
+                    flat[i], pl, missval, nearest_flag, nlon_val, bool(fast)
+                )
 
         out = out.reshape(*lead_shape, int(pl.size), nlon_val)
 
@@ -465,7 +498,6 @@ class GaussRegularizer:
         out_da.attrs["gaussregular_converted"] = "reduced_to_regular"
         out_da.attrs["gaussregular_mode"] = method_name
         out_da.attrs["gaussregular_is_global"] = is_global
-        out_da.attrs["gaussregular_plan_cache"] = "on" if self.cache else "off"
         return out_da
 
     def regularize_dataset(
@@ -515,7 +547,6 @@ class GaussRegularizer:
         out_ds.attrs["gaussregular_converted"] = "reduced_to_regular_dataset"
         out_ds.attrs["gaussregular_mode"] = _normalize_method(
             method, default=self.method)
-        out_ds.attrs["gaussregular_plan_cache"] = "on" if self.cache else "off"
         return out_ds
 
     def regularize(self, data: Any, **kwargs):
