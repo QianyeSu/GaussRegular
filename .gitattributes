@@ -1,0 +1,2 @@
+# Exclude the main Python API surface from GitHub Linguist language statistics
+src/gaussregular/api.py linguist-detectable=false
