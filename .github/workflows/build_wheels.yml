@@ -14,106 +14,106 @@ concurrency:
 
 jobs:
   # =========================================================================
-  # Linux x86_64 (manylinux_2_28)
+  # Linux x86_64
   # =========================================================================
-  build_linux_x86_64:
-    name: Linux x86_64
-    runs-on: ubuntu-latest
+  build_linux:
+    name: Linux ${{ matrix.label }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x86_64 (manylinux_2_28)
+            artifact_name: wheels-linux-manylinux_2_28-x86_64
+            manylinux_image: manylinux_2_28
+          - label: x86_64 (manylinux2014)
+            artifact_name: wheels-linux-manylinux2014-x86_64
+            manylinux_image: manylinux2014
 
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install cibuildwheel
-        run: pip install cibuildwheel==3.4.0
-
       - name: Build wheels
-        run: python -m cibuildwheel --output-dir wheelhouse
+        uses: pypa/cibuildwheel@v3.4.0
+        with:
+          output-dir: wheelhouse
         env:
-          CIBW_BUILD: "cp39-manylinux_x86_64 cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
-          CIBW_SKIP: "*-musllinux* *-win32"
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_BUILD: >-
+            cp39-manylinux_x86_64
+            cp310-manylinux_x86_64
+            cp311-manylinux_x86_64
+            cp312-manylinux_x86_64
+            cp313-manylinux_x86_64
+            cp314-manylinux_x86_64
+          CIBW_SKIP: "*-musllinux* *-win32 *-i686"
+          CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.manylinux_image }}
           CIBW_BEFORE_BUILD: python -m pip install --upgrade pip setuptools wheel numpy
+          CIBW_ENVIRONMENT_LINUX: PIP_PREFER_BINARY=1
           CIBW_TEST_COMMAND: python -c "import gaussregular as gr; print(gr.__name__)"
           CIBW_BUILD_VERBOSITY: 1
 
       - uses: actions/upload-artifact@v7
         with:
-          name: wheels-linux-x86_64
+          name: ${{ matrix.artifact_name }}
           path: wheelhouse/*.whl
 
   # =========================================================================
-  # Linux x86_64 (manylinux2014 for legacy servers)
+  # macOS
   # =========================================================================
-  build_linux2014_x86_64:
-    name: Linux x86_64 (manylinux2014)
-    runs-on: ubuntu-latest
+  build_macos:
+    name: macOS ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x86_64
+            os: macos-15-intel
+            artifact_name: wheels-macos-x86_64
+            build_selector: >-
+              cp39-macosx_x86_64
+              cp310-macosx_x86_64
+              cp311-macosx_x86_64
+              cp312-macosx_x86_64
+              cp313-macosx_x86_64
+              cp314-macosx_x86_64
+          - label: arm64
+            os: macos-14
+            artifact_name: wheels-macos-arm64
+            build_selector: >-
+              cp39-macosx_arm64
+              cp310-macosx_arm64
+              cp311-macosx_arm64
+              cp312-macosx_arm64
+              cp313-macosx_arm64
+              cp314-macosx_arm64
 
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install cibuildwheel
-        run: pip install cibuildwheel==3.4.0
-
       - name: Build wheels
-        run: python -m cibuildwheel --output-dir wheelhouse
+        uses: pypa/cibuildwheel@v3.4.0
+        with:
+          output-dir: wheelhouse
         env:
-          CIBW_BUILD: "cp39-manylinux_x86_64 cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
+          CIBW_BUILD: ${{ matrix.build_selector }}
           CIBW_SKIP: "*-musllinux* *-win32"
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
           CIBW_BEFORE_BUILD: python -m pip install --upgrade pip setuptools wheel numpy
+          CIBW_ENVIRONMENT_MACOS: PIP_PREFER_BINARY=1
           CIBW_TEST_COMMAND: python -c "import gaussregular as gr; print(gr.__name__)"
           CIBW_BUILD_VERBOSITY: 1
 
       - uses: actions/upload-artifact@v7
         with:
-          name: wheels-linux2014-x86_64
-          path: wheelhouse/*.whl
-
-  # =========================================================================
-  # macOS arm64
-  # =========================================================================
-  build_macos_arm64:
-    name: macOS arm64
-    runs-on: macos-14
-    timeout-minutes: 45
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install cibuildwheel
-        run: pip install cibuildwheel==3.4.0
-
-      - name: Build wheels
-        run: python -m cibuildwheel --output-dir wheelhouse
-        env:
-          CIBW_BUILD: "cp39-macosx_arm64 cp310-macosx_arm64 cp311-macosx_arm64 cp312-macosx_arm64 cp313-macosx_arm64 cp314-macosx_arm64"
-          CIBW_BEFORE_BUILD: python -m pip install --upgrade pip setuptools wheel numpy
-          CIBW_TEST_COMMAND: python -c "import gaussregular as gr; print(gr.__name__)"
-          CIBW_BUILD_VERBOSITY: 1
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: wheels-macos-arm64
+          name: ${{ matrix.artifact_name }}
           path: wheelhouse/*.whl
 
   # =========================================================================
   # Windows x86_64
   # =========================================================================
-  build_windows_x86_64:
+  build_windows:
     name: Windows x86_64
     runs-on: windows-2022
     timeout-minutes: 45
@@ -121,19 +121,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install cibuildwheel
-        run: pip install cibuildwheel==3.4.0
-
       - name: Build wheels
-        run: python -m cibuildwheel --output-dir wheelhouse
+        uses: pypa/cibuildwheel@v3.4.0
+        with:
+          output-dir: wheelhouse
         env:
-          CIBW_BUILD: "cp39-win_amd64 cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp313-win_amd64 cp314-win_amd64"
+          CIBW_BUILD: >-
+            cp39-win_amd64
+            cp310-win_amd64
+            cp311-win_amd64
+            cp312-win_amd64
+            cp313-win_amd64
+            cp314-win_amd64
           CIBW_SKIP: "*-musllinux* *-win32"
-          CIBW_BEFORE_BUILD: python -m pip install --upgrade pip setuptools wheel numpy
+          CIBW_BEFORE_BUILD_WINDOWS: python -m pip install --upgrade pip setuptools wheel numpy
           CIBW_TEST_COMMAND: python -c "import gaussregular as gr; print(gr.__name__)"
           CIBW_BUILD_VERBOSITY: 1
 
@@ -171,16 +172,15 @@ jobs:
     name: Test ${{ matrix.os }}
     needs:
       [
-        build_linux_x86_64,
-        build_linux2014_x86_64,
-        build_macos_arm64,
-        build_windows_x86_64,
+        build_linux,
+        build_macos,
+        build_windows,
       ]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-latest, macos-15-intel, macos-14, windows-latest]
         python-version: ["3.12"]
 
     steps:
@@ -195,11 +195,14 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
       - name: Install wheel
-        run: pip install --find-links dist gaussregular
+        run: python -m pip install --find-links dist gaussregular
 
       - name: Verify installation
-        run: python -c "import gaussregular as gr"
+        run: python -c "import gaussregular as gr; print(gr.__version__)"
 
   # =========================================================================
   # Publish to PyPI (on tag push)

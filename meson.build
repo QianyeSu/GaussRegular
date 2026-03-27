@@ -1,5 +1,5 @@
 project('gaussregular', 'c',
-  version : '0.1.0',
+  version : '0.1.2',
   default_options : ['warning_level=2', 'buildtype=release', 'b_lto=true'])
 
 py_mod = import('python')
