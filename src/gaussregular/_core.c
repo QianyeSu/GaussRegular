@@ -187,6 +187,50 @@ static int regularize_row_linear(const double *src, int src_n, double *dst, int 
     return 0;
 }
 
+static int regularize_row_linear_float(const float *src, int src_n, float *dst, int dst_n, int has_missing, double missval)
+{
+    if (src_n <= 0 || dst_n <= 0)
+        return -1;
+    if (src_n == dst_n)
+    {
+        for (int i = 0; i < dst_n; ++i)
+            dst[i] = src[i];
+        return 0;
+    }
+
+    const float scale = (float)src_n / (float)dst_n;
+    for (int i = 0; i < dst_n; ++i)
+    {
+        float x = (float)(i * scale);
+        int i0 = (int)x;
+        float t = x - (float)i0;
+        int i1 = i0 + 1;
+        if (i1 >= src_n)
+            i1 -= src_n;
+
+        float v0 = src[i0];
+        float v1 = src[i1];
+        if (has_missing)
+        {
+            int m0 = is_missing((double)v0, missval);
+            int m1 = is_missing((double)v1, missval);
+            if (m0 && m1)
+                dst[i] = (float)missval;
+            else if (m0)
+                dst[i] = v1;
+            else if (m1)
+                dst[i] = v0;
+            else
+                dst[i] = v0 * (1.0f - t) + v1 * t;
+        }
+        else
+        {
+            dst[i] = v0 * (1.0f - t) + v1 * t;
+        }
+    }
+    return 0;
+}
+
 /* Nearest-neighbour interpolation: find the closest source point for each
    destination index.  When missing values are present, the nearest point
    may itself be missing; in that case we expand a search radius and look
@@ -249,6 +293,60 @@ static int regularize_row_nearest(const double *src, int src_n, double *dst, int
         /* If no valid neighbor found, mark output as missing */
         if (!found)
             dst[i] = missval;
+    }
+    return 0;
+}
+
+static int regularize_row_nearest_float(const float *src, int src_n, float *dst, int dst_n, int has_missing, double missval)
+{
+    if (src_n <= 0 || dst_n <= 0)
+        return -1;
+    if (src_n == dst_n)
+    {
+        for (int i = 0; i < dst_n; ++i)
+            dst[i] = src[i];
+        return 0;
+    }
+
+    const float scale = (float)src_n / (float)dst_n;
+    for (int i = 0; i < dst_n; ++i)
+    {
+        float x = (float)(i * scale);
+        int idx = (int)(x + 0.5);
+        if (idx >= src_n)
+            idx -= src_n;
+        float v = src[idx];
+
+        if (!has_missing || !is_missing((double)v, missval))
+        {
+            dst[i] = v;
+            continue;
+        }
+
+        int found = 0;
+        for (int d = 1; d < src_n; ++d)
+        {
+            int p = idx + d;
+            int m = idx - d;
+            if (p >= src_n)
+                p -= src_n;
+            if (m < 0)
+                m += src_n;
+            if (!is_missing((double)src[p], missval))
+            {
+                dst[i] = src[p];
+                found = 1;
+                break;
+            }
+            if (!is_missing((double)src[m], missval))
+            {
+                dst[i] = src[m];
+                found = 1;
+                break;
+            }
+        }
+        if (!found)
+            dst[i] = (float)missval;
     }
     return 0;
 }
@@ -418,12 +516,55 @@ static int regularize_field(
     return 0;
 }
 
+static int regularize_field_float(
+    const float *in_data,
+    const int *pl_data,
+    npy_intp nlat,
+    int nlon,
+    double missval,
+    int nearest,
+    int fast,
+    float *out_data)
+{
+    npy_intp ptr = 0;
+    for (npy_intp j = 0; j < nlat; ++j)
+    {
+        const int src_n = pl_data[j];
+        const float *src = in_data + ptr;
+        float *dst = out_data + j * (npy_intp)nlon;
+
+        int has_missing = 0;
+        if (!fast)
+        {
+            for (int k = 0; k < src_n; ++k)
+            {
+                if (is_missing((double)src[k], missval))
+                {
+                    has_missing = 1;
+                    break;
+                }
+            }
+        }
+
+        int rc = nearest ? regularize_row_nearest_float(src, src_n, dst, nlon, has_missing, missval)
+                         : regularize_row_linear_float(src, src_n, dst, nlon, has_missing, missval);
+        if (rc != 0)
+        {
+            return rc;
+        }
+
+        ptr += src_n;
+    }
+
+    return 0;
+}
+
 /* Main Python entry point for grid regularization.
    Reads reduced-Gaussian values, converts them to regular-Gaussian via
    per-row interpolation (linear or nearest-neighbor).
 
    Args:
-     values_obj: 1D float64 array of reduced-grid values (row-packed)
+     values_obj: 1D float32/float64 array of reduced-grid values (row-packed)
      pl_obj: 1D int32 array of row lengths (points per latitude)
      missval: Sentinel for missing data
      nearest: 1 for nearest-neighbor, 0 for linear interpolation
@@ -431,7 +572,8 @@ static int regularize_field(
      fast: (optional) If 1, skip per-row missing-value detection for speed.
            Use only when input has no missing values.
 
-   Returns: 2D float64 array of shape (nlat, nlon)
+   Returns: 2D array of shape (nlat, nlon), preserving float32 inputs and
+            otherwise using float64
  */
 static PyObject *py_regularize_values(PyObject *self, PyObject *args)
 {
@@ -447,7 +589,7 @@ static PyObject *py_regularize_values(PyObject *self, PyObject *args)
         return NULL;
     }
 
-    PyArrayObject *values = (PyArrayObject *)PyArray_FROM_OTF(values_obj, NPY_FLOAT64, NPY_ARRAY_IN_ARRAY);
+    PyArrayObject *values = (PyArrayObject *)PyArray_FROM_OTF(values_obj, NPY_NOTYPE, NPY_ARRAY_IN_ARRAY);
     PyArrayObject *pl = (PyArrayObject *)PyArray_FROM_OTF(pl_obj, NPY_INT32, NPY_ARRAY_IN_ARRAY);
     if (!values || !pl)
     {
@@ -456,9 +598,26 @@ static PyObject *py_regularize_values(PyObject *self, PyObject *args)
         return NULL;
     }
 
+    int out_typenum = NPY_FLOAT64;
+    int values_typenum = PyArray_TYPE(values);
+    if (values_typenum == NPY_FLOAT32)
+    {
+        out_typenum = NPY_FLOAT32;
+    }
+    else if (values_typenum != NPY_FLOAT64)
+    {
+        Py_DECREF(values);
+        values = (PyArrayObject *)PyArray_FROM_OTF(values_obj, NPY_FLOAT64, NPY_ARRAY_IN_ARRAY);
+        if (!values)
+        {
+            Py_DECREF(pl);
+            return NULL;
+        }
+    }
+
     if (PyArray_NDIM(values) != 1)
     {
-        PyErr_SetString(PyExc_ValueError, "values must be 1D float64 array");
+        PyErr_SetString(PyExc_ValueError, "values must be 1D numeric array");
         Py_DECREF(values);
         Py_DECREF(pl);
         return NULL;
@@ -503,7 +662,7 @@ static PyObject *py_regularize_values(PyObject *self, PyObject *args)
     }
 
     npy_intp out_dims[2] = {nlat, (npy_intp)nlon};
-    PyArrayObject *out = (PyArrayObject *)PyArray_SimpleNew(2, out_dims, NPY_FLOAT64);
+    PyArrayObject *out = (PyArrayObject *)PyArray_SimpleNew(2, out_dims, out_typenum);
     if (!out)
     {
         Py_DECREF(values);
@@ -511,10 +670,21 @@ static PyObject *py_regularize_values(PyObject *self, PyObject *args)
         return NULL;
     }
 
-    const double *in_data = (const double *)PyArray_DATA(values);
-    double *out_data = (double *)PyArray_DATA(out);
-
-    int rc = regularize_field(in_data, pl_data, nlat, nlon, missval, nearest, fast, out_data);
+    int rc = 0;
+    Py_BEGIN_ALLOW_THREADS
+    if (out_typenum == NPY_FLOAT32)
+    {
+        const float *in_data = (const float *)PyArray_DATA(values);
+        float *out_data = (float *)PyArray_DATA(out);
+        rc = regularize_field_float(in_data, pl_data, nlat, nlon, missval, nearest, fast, out_data);
+    }
+    else
+    {
+        const double *in_data = (const double *)PyArray_DATA(values);
+        double *out_data = (double *)PyArray_DATA(out);
+        rc = regularize_field(in_data, pl_data, nlat, nlon, missval, nearest, fast, out_data);
+    }
+    Py_END_ALLOW_THREADS
     if (rc != 0)
     {
         Py_DECREF(values);
@@ -545,7 +715,7 @@ static PyObject *py_regularize_values_batch(PyObject *self, PyObject *args)
         return NULL;
     }
 
-    PyArrayObject *values = (PyArrayObject *)PyArray_FROM_OTF(values_obj, NPY_FLOAT64, NPY_ARRAY_IN_ARRAY);
+    PyArrayObject *values = (PyArrayObject *)PyArray_FROM_OTF(values_obj, NPY_NOTYPE, NPY_ARRAY_IN_ARRAY);
     PyArrayObject *pl = (PyArrayObject *)PyArray_FROM_OTF(pl_obj, NPY_INT32, NPY_ARRAY_IN_ARRAY);
     if (!values || !pl)
     {
@@ -554,9 +724,26 @@ static PyObject *py_regularize_values_batch(PyObject *self, PyObject *args)
         return NULL;
     }
 
+    int out_typenum = NPY_FLOAT64;
+    int values_typenum = PyArray_TYPE(values);
+    if (values_typenum == NPY_FLOAT32)
+    {
+        out_typenum = NPY_FLOAT32;
+    }
+    else if (values_typenum != NPY_FLOAT64)
+    {
+        Py_DECREF(values);
+        values = (PyArrayObject *)PyArray_FROM_OTF(values_obj, NPY_FLOAT64, NPY_ARRAY_IN_ARRAY);
+        if (!values)
+        {
+            Py_DECREF(pl);
+            return NULL;
+        }
+    }
+
     if (PyArray_NDIM(values) != 2)
     {
-        PyErr_SetString(PyExc_ValueError, "values must be 2D float64 array");
+        PyErr_SetString(PyExc_ValueError, "values must be 2D numeric array");
         Py_DECREF(values);
         Py_DECREF(pl);
         return NULL;
@@ -603,7 +790,7 @@ static PyObject *py_regularize_values_batch(PyObject *self, PyObject *args)
     }
 
     npy_intp out_dims[3] = {batch, nlat, (npy_intp)nlon};
-    PyArrayObject *out = (PyArrayObject *)PyArray_SimpleNew(3, out_dims, NPY_FLOAT64);
+    PyArrayObject *out = (PyArrayObject *)PyArray_SimpleNew(3, out_dims, out_typenum);
     if (!out)
     {
         Py_DECREF(values);
@@ -611,23 +798,47 @@ static PyObject *py_regularize_values_batch(PyObject *self, PyObject *args)
         return NULL;
     }
 
-    const double *in_data = (const double *)PyArray_DATA(values);
-    double *out_data = (double *)PyArray_DATA(out);
-
-    for (npy_intp b = 0; b < batch; ++b)
+    int rc = 0;
+    Py_BEGIN_ALLOW_THREADS
+    if (out_typenum == NPY_FLOAT32)
     {
-        const double *in_b = in_data + b * nvals;
-        double *out_b = out_data + b * (nlat * (npy_intp)nlon);
-
-        int rc = regularize_field(in_b, pl_data, nlat, nlon, missval, nearest, fast, out_b);
-        if (rc != 0)
+        const float *in_data = (const float *)PyArray_DATA(values);
+        float *out_data = (float *)PyArray_DATA(out);
+        for (npy_intp b = 0; b < batch; ++b)
         {
-            Py_DECREF(values);
-            Py_DECREF(pl);
-            Py_DECREF(out);
-            PyErr_SetString(PyExc_RuntimeError, "row interpolation failed");
-            return NULL;
+            const float *in_b = in_data + b * nvals;
+            float *out_b = out_data + b * (nlat * (npy_intp)nlon);
+            rc = regularize_field_float(in_b, pl_data, nlat, nlon, missval, nearest, fast, out_b);
+            if (rc != 0)
+            {
+                break;
+            }
         }
+    }
+    else
+    {
+        const double *in_data = (const double *)PyArray_DATA(values);
+        double *out_data = (double *)PyArray_DATA(out);
+        for (npy_intp b = 0; b < batch; ++b)
+        {
+            const double *in_b = in_data + b * nvals;
+            double *out_b = out_data + b * (nlat * (npy_intp)nlon);
+            rc = regularize_field(in_b, pl_data, nlat, nlon, missval, nearest, fast, out_b);
+            if (rc != 0)
+            {
+                break;
+            }
+        }
+    }
+    Py_END_ALLOW_THREADS
+
+    if (rc != 0)
+    {
+        Py_DECREF(values);
+        Py_DECREF(pl);
+        Py_DECREF(out);
+        PyErr_SetString(PyExc_RuntimeError, "row interpolation failed");
+        return NULL;
     }
 
     Py_DECREF(values);
@@ -637,9 +848,9 @@ static PyObject *py_regularize_values_batch(PyObject *self, PyObject *args)
 
 static PyMethodDef methods[] = {
     {"regularize_values_batch", py_regularize_values_batch, METH_VARARGS,
-     "regularize_values_batch(values2d, pl, missval, nearest, nlon, fast=False) -> 3D float64 array"},
+     "regularize_values_batch(values2d, pl, missval, nearest, nlon, fast=False) -> 3D array"},
     {"regularize_values", py_regularize_values, METH_VARARGS,
-     "regularize_values(values, pl, missval, nearest, nlon, fast=False) -> 2D float64 array"},
+     "regularize_values(values, pl, missval, nearest, nlon, fast=False) -> 2D array"},
     {"reduced_row", py_reduced_row, METH_VARARGS,
      "reduced_row(pl, xfirst, xlast) -> (npoints, ilon_first, ilon_last)"},
     {"is_global", py_is_global, METH_VARARGS,

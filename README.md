@@ -24,7 +24,7 @@ Both grid types carry a `pl` array (points per latitude row) and use identical r
   - **Nearest-neighbor** — matching CDO `setgridtype,regularnn`
 - **C-accelerated**: Core interpolation in compiled C, ~10-100x faster than pure NumPy
 - **In-memory processing**: Read GRIB2 data → convert → analyze → output, no intermediate files
-- **Double-precision internals**: Matching CDO's numerical accuracy
+- **Configurable precision**: `precision="auto"` preserves float32/float64 input precision; `single` and `double` force the output precision
 - **xarray/cfgrib integration**: Direct support for GRIB2 data
 - **Batch processing**: Efficient multi-dimensional array handling (time, level, etc.)
 
@@ -183,6 +183,20 @@ regular_ds = engine.regularize_dataset(ds)
 regular_ds_safe = engine.regularize_dataset(ds, fast=False)
 ```
 
+### Advanced: Precision
+
+By default `precision="auto"` is used. Float32 inputs use the single-precision C path and return float32 outputs; float64 inputs use the double-precision C path and return float64 outputs. Use `precision="single"` or `precision="double"` to force a specific output precision:
+
+```python
+import gaussregular as gr
+
+engine = gr.GaussRegularizer(method="linear", cache=True)
+
+regular_auto = engine.regularize_xarray(da)  # follows da.dtype for float32/float64
+regular_f32 = engine.regularize_xarray(da, precision="single")
+regular_f64 = engine.regularize_xarray(da, precision="double")
+```
+
 ## API Reference
 
 ### `GaussRegularizer`
@@ -191,6 +205,7 @@ Main converter class.
 
 #### Parameters:
 - **`method`** (str, default="linear"): Interpolation method, either `"linear"` or `"nearest"`
+- **`precision`** (str, default="auto"): Precision policy, one of `"auto"`, `"single"`, or `"double"`. Auto preserves float32/float64 input precision
 - **`grid_number`** (int, optional): Default Gaussian truncation number N (e.g., 320 for N320/O320). Used when `GRIB_N` is missing for xarray inputs and as a fallback when `regularize_values` is called without a per-call `grid_number`. When neither metadata nor this attribute provide N, a heuristic based on the equatorial row length is used
 - **`cache`** (bool, default=False): Enable xarray metadata plan caching for repeated calls on same-structure data
 - **`max_plan_cache`** (int, default=32): Maximum number of cached conversion plans

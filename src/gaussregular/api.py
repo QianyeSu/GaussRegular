@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Optional, Tuple, TYPE_CHECKING, Union
+from typing import Any, Iterable, Literal, Mapping, Optional, Tuple, TYPE_CHECKING, Union
 
 import numpy as np
 from . import _core
@@ -32,6 +32,14 @@ GRID_TYPE_FULL_NAMES = {
 
 REDUCED_GAUSSIAN_ALIASES = set(GRID_TYPE_FULL_NAMES)
 VALID_METHODS = {"linear", "nearest"}
+PrecisionMode = Literal["auto", "single", "double"]
+PRECISION_ALIASES = {
+    "auto": "auto",
+    "single": "single",
+    "float32": "single",
+    "double": "double",
+    "float64": "double",
+}
 
 
 def _supported_grid_types_message() -> str:
@@ -56,6 +64,33 @@ def _normalize_method(method: Optional[str], default: str = "linear") -> str:
         supported = ", ".join(sorted(VALID_METHODS))
         raise ValueError(f"method must be one of: {supported}")
     return chosen
+
+
+def _normalize_precision(
+    precision: Optional[str],
+    default: str = "auto",
+) -> str:
+    chosen = default if precision is None else str(precision).strip().lower()
+    normalized = PRECISION_ALIASES.get(chosen)
+    if normalized is None:
+        supported = ", ".join(sorted(PRECISION_ALIASES))
+        raise ValueError(f"precision must be one of: {supported}")
+    return normalized
+
+
+def _precision_dtypes(dtype: np.dtype, precision: str) -> tuple[np.dtype, np.dtype]:
+    """Return (compute dtype, public output dtype)."""
+    dtype = np.dtype(dtype)
+    if precision == "single":
+        return np.dtype(np.float32), np.dtype(np.float32)
+    if precision == "double":
+        return np.dtype(np.float64), np.dtype(np.float64)
+
+    if dtype == np.dtype(np.float32):
+        return np.dtype(np.float32), np.dtype(np.float32)
+    if dtype == np.dtype(np.float64):
+        return np.dtype(np.float64), np.dtype(np.float64)
+    return np.dtype(np.float64), dtype
 
 
 def _is_supported_reduced_grid(attrs: Mapping[str, Any]) -> bool:
@@ -111,10 +146,10 @@ class GaussRegularizer:
     **O-grids** (e.g. O320, O640, O1280).  Both grid families carry a ``pl``
     array and use the identical row-wise interpolation path.
 
-    Computation is always performed in **double precision** (matching CDO
-    ``setgridtype,regular`` / ``setgridtype,regularnn``).  The *output* array
-    is cast back to the same dtype as the input so that float32 data does not
-    silently bloat to float64.
+    Precision defaults to ``"auto"``: float32 input uses the single-precision
+    C path and returns float32, while float64 input uses the double-precision
+    C path and returns float64. Set ``precision="single"`` or
+    ``precision="double"`` to force a public output precision.
 
     Optimisation mode
     -----------------
@@ -132,6 +167,9 @@ class GaussRegularizer:
         Interpolation method. ``linear`` (default) matches CDO
         ``setgridtype,regular``; ``nearest`` matches CDO
         ``setgridtype,regularnn``.
+    precision:
+        Default precision policy: ``"auto"``, ``"single"``, or ``"double"``.
+        ``"auto"`` preserves float32/float64 input precision.
     grid_number:
         Optional default Gaussian truncation number N (e.g. 320 for
         N320/O320).  Used when ``GRIB_N`` is missing for xarray inputs and
@@ -161,6 +199,7 @@ class GaussRegularizer:
     """
 
     method: str = "linear"
+    precision: PrecisionMode = "auto"
     grid_number: Optional[int] = None
     cache: bool = False
     max_plan_cache: int = 100000
@@ -169,6 +208,7 @@ class GaussRegularizer:
 
     def __post_init__(self) -> None:
         self.method = _normalize_method(self.method)
+        self.precision = _normalize_precision(self.precision)  # type: ignore[assignment]
 
     def clear_cache(self) -> None:
         """Clear internal xarray plan cache."""
@@ -291,6 +331,7 @@ class GaussRegularizer:
         xlast: float = 359.9999,
         method: Optional[str] = None,
         fast: bool = True,
+        precision: Optional[PrecisionMode] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Interpolate a flat reduced Gaussian array to a regular longitude grid.
 
@@ -299,8 +340,9 @@ class GaussRegularizer:
         values:
             1-D array of reduced-grid values packed row-by-row from north to
             south.  Length must equal ``sum(pl)``.  Any numeric dtype is
-            accepted (float32, float64, …); the interpolation is performed in
-            float64 internally and the result is cast back to the input dtype.
+            accepted (float32, float64, etc.); float32 and float64 arrays keep
+            their dtype through the C path, while other numeric dtypes are
+            converted through float64 and cast back to the input dtype.
         pl:
             **Points per latitude row** — the ``GRIB_pl`` attribute.  1-D
             integer array with one entry per latitude circle (north → south).
@@ -338,6 +380,10 @@ class GaussRegularizer:
         fast:
             If ``True``, skip row-wise missing-value detection for speed.
             Use only when input is guaranteed to contain no missing values.
+        precision:
+            ``"auto"`` preserves float32/float64 input precision.
+            ``"single"`` computes and returns float32; ``"double"`` computes
+            and returns float64. Defaults to the regularizer's precision.
 
         Notes
         -----
@@ -350,7 +396,8 @@ class GaussRegularizer:
         -------
         out : np.ndarray
             2-D array of shape ``(nlat, nlon)`` with the regularised field.
-            **Dtype matches the input** *values* dtype.
+            With ``precision="auto"``, float32 input returns float32 and
+            float64 input returns float64.
         lon : np.ndarray
             1-D longitude coordinate array of length *nlon*, degrees east.
         """
@@ -368,9 +415,11 @@ class GaussRegularizer:
         if nlon <= 0:
             raise ValueError("nlon must be positive")
 
-        orig_dtype = np.asarray(values).dtype
-        # Pass as-is; the C extension converts to float64 internally.
-        vals = np.asarray(values)
+        vals_in = np.asarray(values)
+        precision_name = _normalize_precision(precision, default=self.precision)
+        compute_dtype, public_dtype = _precision_dtypes(
+            vals_in.dtype, precision_name)
+        vals = vals_in.astype(compute_dtype, copy=False)
         if vals.ndim != 1:
             raise ValueError(
                 "values must be a 1D array with length == sum(pl)")
@@ -380,11 +429,10 @@ class GaussRegularizer:
             raise ValueError(
                 f"values length {vals.size} does not match sum(pl) {expected}")
 
-        # C extension always returns float64; cast back to input dtype.
         out = _core.regularize_values(
             vals, pl_arr, float(missval), nearest_flag, int(nlon), bool(fast))
-        if orig_dtype != np.float64:
-            out = out.astype(orig_dtype, copy=False)
+        if out.dtype != public_dtype:
+            out = out.astype(public_dtype, copy=False)
 
         is_glob = bool(_core.is_global(np_in, pl_arr, float(
             xfirst), float(xlast))) if np_in > 0 else True
@@ -410,6 +458,7 @@ class GaussRegularizer:
         method: Optional[str] = None,
         grid_type_hint: Optional[str] = None,
         fast: bool = True,
+        precision: Optional[PrecisionMode] = None,
     ) -> "xr.DataArray":
         """Interpolate an xarray DataArray from reduced to regular Gaussian grid.
 
@@ -436,13 +485,17 @@ class GaussRegularizer:
             Optional manual grid type name when metadata is incomplete.
             Must be one of the supported names listed by
             ``gaussregular.api.GRID_TYPE_FULL_NAMES``.
+        precision:
+            ``"auto"`` preserves float32/float64 input precision.
+            ``"single"`` computes and returns float32; ``"double"`` computes
+            and returns float64. Defaults to the regularizer's precision.
 
         Returns
         -------
         xarray.DataArray
             Same shape except the last dimension is replaced by
-            ``(latitude, longitude)``.  **Output dtype matches the input
-            dtype** (e.g. float32 in → float32 out).  Added attributes:
+            ``(latitude, longitude)``. With ``precision="auto"``, float32
+            input returns float32 and float64 input returns float64. Added attributes:
             ``gaussregular_converted``, ``gaussregular_mode``,
             ``gaussregular_is_global``.
         """
@@ -495,9 +548,11 @@ class GaussRegularizer:
         method_name = _normalize_method(method, default=self.method)
         nearest_flag = method_name == "nearest"
 
-        orig_dtype = dataarray.values.dtype
-        # Do not force dtype here; the C extension converts internally.
-        arr = np.asarray(dataarray.values)
+        arr_in = np.asarray(dataarray.values)
+        precision_name = _normalize_precision(precision, default=self.precision)
+        compute_dtype, public_dtype = _precision_dtypes(
+            arr_in.dtype, precision_name)
+        arr = arr_in.astype(compute_dtype, copy=False)
         last = arr.shape[-1]
         if last != expected:
             raise ValueError(
@@ -515,7 +570,8 @@ class GaussRegularizer:
             )
         except AttributeError:
             # Fallback for older cores: loop in Python.
-            out = np.empty((batch, int(pl.size), nlon_val), dtype=np.float64)
+            out = np.empty((batch, int(pl.size), nlon_val),
+                           dtype=compute_dtype)
             for i in range(batch):
                 out[i] = _core.regularize_values(
                     flat[i], pl, missval, nearest_flag, nlon_val, bool(fast)
@@ -523,9 +579,8 @@ class GaussRegularizer:
 
         out = out.reshape(*lead_shape, int(pl.size), nlon_val)
 
-        # Cast output back to the original dtype (avoids float32 → float64 bloat).
-        if orig_dtype != np.float64:
-            out = out.astype(orig_dtype, copy=False)
+        if out.dtype != public_dtype:
+            out = out.astype(public_dtype, copy=False)
 
         dims = tuple(lead_dims + ["latitude", "longitude"])
 
@@ -553,6 +608,7 @@ class GaussRegularizer:
         method: Optional[str] = None,
         grid_type_hint: Optional[str] = None,
         fast: bool = True,
+        precision: Optional[PrecisionMode] = None,
     ) -> "xr.Dataset":
         """Interpolate all convertible variables in an xarray Dataset.
 
@@ -587,6 +643,7 @@ class GaussRegularizer:
                 method=method,
                 grid_type_hint=grid_type_hint,
                 fast=fast,
+                precision=precision,
             )
 
         out_ds = xr.Dataset(out_vars, attrs=dict(dataset.attrs))
@@ -654,6 +711,7 @@ def regularize_values(
     pl: Iterable[int],
     missval: float,
     method: str = "linear",
+    precision: PrecisionMode = "auto",
     nlon: Optional[int] = None,
     grid_number: Optional[int] = None,
     xfirst: float = 0.0,
@@ -673,6 +731,9 @@ def regularize_values(
         Missing-value sentinel (e.g. ``9.999e20``, ``float('nan')``).
     method:
         ``linear`` (default) or ``nearest``.
+    precision:
+        ``"auto"`` preserves float32/float64 input precision.
+        ``"single"`` returns float32; ``"double"`` returns float64.
     nlon:
         Output longitude count; inferred from ``pl`` when *None*.
     grid_number:
@@ -696,6 +757,7 @@ def regularize_values(
         pl=pl,
         missval=missval,
         method=method,
+        precision=precision,
         nlon=nlon,
         grid_number=grid_number,
         xfirst=xfirst,
@@ -707,6 +769,7 @@ def regularize_values(
 def regularize_xarray(
     dataarray: "xr.DataArray",
     method: str = "linear",
+    precision: PrecisionMode = "auto",
     nlon: Optional[int] = None,
     grid_type_hint: Optional[str] = None,
     fast: bool = True,
@@ -720,6 +783,9 @@ def regularize_xarray(
         attrs (N-grids and O-grids both supported).
     method:
         ``linear`` (default) or ``nearest``.
+    precision:
+        ``"auto"`` preserves float32/float64 input precision.
+        ``"single"`` returns float32; ``"double"`` returns float64.
     nlon:
         Override output longitude count.
     grid_type_hint:
@@ -735,6 +801,7 @@ def regularize_xarray(
     return _DEFAULT.regularize_xarray(
         dataarray,
         method=method,
+        precision=precision,
         nlon=nlon,
         grid_type_hint=grid_type_hint,
         fast=fast,
@@ -744,6 +811,7 @@ def regularize_xarray(
 def regularize_dataset(
     dataset: "xr.Dataset",
     method: str = "linear",
+    precision: PrecisionMode = "auto",
     nlon: Optional[int] = None,
     grid_type_hint: Optional[str] = None,
     fast: bool = True,
@@ -752,6 +820,7 @@ def regularize_dataset(
     return _DEFAULT.regularize_dataset(
         dataset,
         method=method,
+        precision=precision,
         nlon=nlon,
         grid_type_hint=grid_type_hint,
         fast=fast,
